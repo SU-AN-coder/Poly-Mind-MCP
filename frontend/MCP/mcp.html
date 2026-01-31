@@ -1,0 +1,177 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PolyMind Terminal - WebSocket Interface</title>
+    <link rel="stylesheet" href="mcp.css">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;700;900&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+</head>
+<body>
+    <!-- 粒子背景画布 -->
+    <canvas id="particleCanvas"></canvas>
+
+    <!-- 扫描线效果 -->
+    <div class="scanline"></div>
+
+    <div class="container">
+        <!-- 头部标题区域 -->
+        <header class="header">
+            <div class="title-wrapper">
+                <div class="glitch-wrapper">
+                    <h1 class="title" data-text="POLYMIND">POLYMIND</h1>
+                </div>
+                <div class="subtitle">REAL-TIME WEBSOCKET TERMINAL</div>
+            </div>
+            <div class="header-decoration">
+                <div class="decoration-line"></div>
+                <div class="decoration-dot"></div>
+            </div>
+        </header>
+
+        <!-- 状态栏 -->
+        <section class="status-bar">
+            <div class="status-grid">
+                <div class="status-card">
+                    <div class="status-icon">
+                        <div id="statusDot" class="status-indicator"></div>
+                        <div class="pulse-ring"></div>
+                    </div>
+                    <div class="status-info">
+                        <div class="status-label">CONNECTION</div>
+                        <div id="statusText" class="status-value">OFFLINE</div>
+                    </div>
+                </div>
+
+                <div class="status-card">
+                    <div class="status-icon">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                    </div>
+                    <div class="status-info">
+                        <div class="status-label">MESSAGES</div>
+                        <div id="msgCount" class="status-value">0</div>
+                    </div>
+                </div>
+
+                <div class="status-card">
+                    <div class="status-icon">
+                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none">
+                            <rect x="3" y="3" width="18" height="18" rx="2" stroke="currentColor" stroke-width="2"/>
+                            <path d="M9 9h6M9 15h6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                        </svg>
+                    </div>
+                    <div class="status-info">
+                        <div class="status-label">CLIENT ID</div>
+                        <div id="clientId" class="status-value">---</div>
+                    </div>
+                </div>
+            </div>
+        </section>
+
+        <!-- 控制面板 -->
+        <section class="control-panel">
+            <div class="panel-header">
+                <h2>CONTROL INTERFACE</h2>
+                <div class="header-line"></div>
+            </div>
+
+            <div class="controls">
+                <button class="btn btn-primary" onclick="connect()">
+                    <span class="btn-icon">▶</span>
+                    <span>CONNECT</span>
+                </button>
+                <button class="btn btn-danger" onclick="disconnect()">
+                    <span class="btn-icon">◼</span>
+                    <span>DISCONNECT</span>
+                </button>
+                <button class="btn btn-secondary" onclick="subscribeTrades()">
+                    <span class="btn-icon">⚡</span>
+                    <span>TRADE FEED</span>
+                </button>
+                <button class="btn btn-secondary" onclick="subscribeSmartMoney()">
+                    <span class="btn-icon">💎</span>
+                    <span>SMART MONEY</span>
+                </button>
+                <button class="btn btn-secondary" onclick="ping()">
+                    <span class="btn-icon">📡</span>
+                    <span>PING</span>
+                </button>
+                <button class="btn btn-clear" onclick="clearLogs()">
+                    <span class="btn-icon">🗑</span>
+                    <span>CLEAR</span>
+                </button>
+            </div>
+
+            <!-- 订阅表单 -->
+            <div class="subscription-section">
+                <div class="input-group">
+                    <div class="input-wrapper">
+                        <label>MARKET SLUG</label>
+                        <input type="text" id="marketSlug" placeholder="Enter market identifier...">
+                    </div>
+                    <button class="btn btn-accent" onclick="subscribeMarket()">SUBSCRIBE</button>
+                </div>
+
+                <div class="input-group">
+                    <div class="input-wrapper">
+                        <label>TRADER ADDRESS</label>
+                        <input type="text" id="traderAddress" placeholder="Enter wallet address...">
+                    </div>
+                    <button class="btn btn-accent" onclick="subscribeTrader()">SUBSCRIBE</button>
+                </div>
+            </div>
+        </section>
+
+        <!-- 日志面板 -->
+        <section class="log-section">
+            <div class="log-panels">
+                <!-- 接收消息面板 -->
+                <div class="log-panel">
+                    <div class="panel-header">
+                        <h3>
+                            <span class="panel-icon">📥</span>
+                            INCOMING STREAM
+                        </h3>
+                        <div class="panel-badge">
+                            <span id="logCount">0</span>
+                        </div>
+                    </div>
+                    <div class="log-container" id="messageLog">
+                        <div class="log-placeholder">
+                            <div class="placeholder-icon">⚡</div>
+                            <div class="placeholder-text">Waiting for data stream...</div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 发送消息面板 -->
+                <div class="log-panel">
+                    <div class="panel-header">
+                        <h3>
+                            <span class="panel-icon">📤</span>
+                            OUTGOING REQUESTS
+                        </h3>
+                        <div class="panel-badge">
+                            <span id="sentCount">0</span>
+                        </div>
+                    </div>
+                    <div class="log-container" id="sentLog">
+                        <div class="log-placeholder">
+                            <div class="placeholder-icon">📡</div>
+                            <div class="placeholder-text">No requests sent yet...</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </div>
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.0/socket.io.min.js"></script>
+    <script src="particles.js"></script>
+    <script src="mcp.js"></script>
+</body>
+</html>
