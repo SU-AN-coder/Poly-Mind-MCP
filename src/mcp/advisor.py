@@ -1,72 +1,132 @@
 """
-意图交易建议 (Smart Assistant)
-检测关联市场价格差异，推荐套利机会
+交易顾问模块
+提供交易建议、套利扫描和市场关联分析
 """
 import os
-import json
 import logging
-from typing import Dict, List, Optional, Tuple
+import requests
+from typing import Dict, List, Optional, Any, Tuple
 from dataclasses import dataclass, asdict
 from datetime import datetime
-import requests
+import re
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 
 @dataclass
-class MarketOpportunity:
-    """市场机会"""
+class ArbitrageOpportunity:
+    """套利机会"""
+    type: str                    # 套利类型: yes_no_spread, cross_market
     market_slug: str
-    market_title: str
-    current_price_yes: float
-    current_price_no: float
-    opportunity_type: str  # arbitrage, momentum, contrarian
-    expected_return: float
-    risk_level: str
-    reasoning: str
-    related_markets: List[str]
-    timestamp: str
+    market_title: str = ""
+    yes_price: float = 0.5
+    no_price: float = 0.5
+    spread: float = 0.0
+    potential_profit: float = 0.0
+    confidence: str = "中"
+    details: str = ""
+    reasoning: str = ""
+    timestamp: str = ""
 
 
 @dataclass
-class ArbitrageOpportunity:
-    """套利机会"""
-    market_a_slug: str
-    market_b_slug: str
-    market_a_title: str
-    market_b_title: str
-    price_gap: float
-    direction: str  # "A高估" or "B高估"
-    potential_profit: float
-    confidence: str
+class MarketRelationship:
+    """市场关系"""
+    market_a: str
+    market_b: str
+    relationship_type: str       # contains, excludes, correlated, independent
+    confidence: float
+    description: str
+    arbitrage_opportunity: Optional[ArbitrageOpportunity] = None
+
+
+@dataclass
+class TradingAdvice:
+    """交易建议"""
+    market_slug: str
+    market_title: str
+    current_yes_price: float
+    current_no_price: float
+    recommendation: str          # BUY_YES, BUY_NO, HOLD, WAIT
+    confidence: str              # 高, 中, 低
     reasoning: str
-    timestamp: str
+    related_markets: List[Dict]
+    arbitrage_opportunities: List[ArbitrageOpportunity]
+    smart_money_signal: str
+    risk_warnings: List[str]
 
 
 class TradeAdvisor:
-    """交易建议引擎"""
+    """交易顾问"""
     
-    def __init__(self, openai_api_key: Optional[str] = None):
-        self.openai_api_key = openai_api_key or os.getenv("OPENAI_API_KEY")
+    def __init__(self):
         self.gamma_base_url = os.getenv("GAMMA_BASE_URL", "https://gamma-api.polymarket.com")
+        self.market_cache = {}
+        self.cache_ttl = 300  # 5分钟缓存
     
-    def get_market_price(self, market_slug: str) -> Optional[Dict]:
-        """获取市场当前价格"""
+    def get_trading_advice(self, market_slug: str, user_intent: Optional[str] = None) -> Dict:
+        """获取交易建议"""
+        try:
+            # 获取市场信息
+            market_info = self._fetch_market(market_slug)
+            if not market_info:
+                return {"error": f"市场 {market_slug} 未找到"}
+            
+            yes_price = market_info.get("yes_price", 0.5)
+            no_price = market_info.get("no_price", 0.5)
+            
+            # 分析价格信号
+            recommendation, reasoning = self._analyze_price_signal(yes_price, no_price, user_intent)
+            
+            # 查找关联市场
+            related = self._find_related_markets(market_slug, market_info.get("title", ""))
+            
+            # 扫描套利机会
+            arb_opportunities = self._scan_market_arbitrage(market_info)
+            
+            # 生成风险提示
+            risk_warnings = self._generate_risk_warnings(market_info, yes_price)
+            
+            # 判断置信度
+            confidence = self._calculate_confidence(market_info, related, arb_opportunities)
+            
+            advice = TradingAdvice(
+                market_slug=market_slug,
+                market_title=market_info.get("title", market_slug),
+                current_yes_price=yes_price,
+                current_no_price=no_price,
+                recommendation=recommendation,
+                confidence=confidence,
+                reasoning=reasoning,
+                related_markets=related[:5],
+                arbitrage_opportunities=arb_opportunities,
+                smart_money_signal="观望",
+                risk_warnings=risk_warnings
+            )
+            
+            return self._advice_to_dict(advice)
+            
+        except Exception as e:
+            logger.error(f"获取交易建议失败: {e}")
+            return {"error": str(e)}
+    
+    def _fetch_market(self, market_slug: str) -> Optional[Dict]:
+        """获取市场信息"""
         try:
             response = requests.get(
                 f"{self.gamma_base_url}/markets",
                 params={"slug": market_slug},
                 timeout=10
             )
+            
             if response.status_code == 200:
                 markets = response.json()
                 if markets:
                     market = markets[0]
-                    # 从 tokens 获取价格
                     tokens = market.get("tokens", [])
-                    yes_price = 0.5
-                    no_price = 0.5
+                    yes_price = no_price = 0.5
+                    
                     for token in tokens:
                         if token.get("outcome") == "Yes":
                             yes_price = float(token.get("price", 0.5))
@@ -76,63 +136,66 @@ class TradeAdvisor:
                     return {
                         "slug": market_slug,
                         "title": market.get("question", market_slug),
+                        "description": market.get("description", ""),
                         "yes_price": yes_price,
                         "no_price": no_price,
-                        "volume": market.get("volume", 0),
-                        "liquidity": market.get("liquidity", 0)
+                        "volume": float(market.get("volume", 0)),
+                        "liquidity": float(market.get("liquidity", 0)),
+                        "end_date": market.get("endDate"),
+                        "active": market.get("active", True)
                     }
-        except Exception as e:
-            logger.error(f"获取市场价格失败: {e}")
-        return None
-    
-    def detect_yes_no_arbitrage(self, market_slug: str) -> Optional[ArbitrageOpportunity]:
-        """
-        检测 YES + NO 价格套利机会
-        如果 YES + NO < 1，存在套利空间
-        """
-        market = self.get_market_price(market_slug)
-        if not market:
             return None
-        
-        total = market["yes_price"] + market["no_price"]
-        
-        if total < 0.98:  # 2% 以上的套利空间
-            profit = (1 - total) * 100
-            return ArbitrageOpportunity(
-                market_a_slug=f"{market_slug}-yes",
-                market_b_slug=f"{market_slug}-no",
-                market_a_title=f"{market['title']} - YES",
-                market_b_title=f"{market['title']} - NO",
-                price_gap=round(1 - total, 4),
-                direction="双向买入",
-                potential_profit=round(profit, 2),
-                confidence="高" if profit > 3 else "中",
-                reasoning=f"YES({market['yes_price']:.2f}) + NO({market['no_price']:.2f}) = {total:.2f} < 1.00，买入两边可无风险获利{profit:.2f}%",
-                timestamp=datetime.now().isoformat()
-            )
-        elif total > 1.02:  # 价格偏高
-            return ArbitrageOpportunity(
-                market_a_slug=f"{market_slug}-yes",
-                market_b_slug=f"{market_slug}-no",
-                market_a_title=f"{market['title']} - YES",
-                market_b_title=f"{market['title']} - NO",
-                price_gap=round(total - 1, 4),
-                direction="价格偏高",
-                potential_profit=0,
-                confidence="低",
-                reasoning=f"YES({market['yes_price']:.2f}) + NO({market['no_price']:.2f}) = {total:.2f} > 1.00，不建议买入",
-                timestamp=datetime.now().isoformat()
-            )
-        
-        return None
+        except Exception as e:
+            logger.error(f"获取市场失败: {e}")
+            return None
     
-    def find_related_markets(self, market_slug: str, limit: int = 5) -> List[Dict]:
+    def _analyze_price_signal(self, yes_price: float, no_price: float, 
+                             user_intent: Optional[str]) -> Tuple[str, str]:
+        """分析价格信号"""
+        spread = yes_price + no_price - 1.0
+        
+        # 基于用户意图
+        if user_intent:
+            intent_lower = user_intent.lower()
+            if any(word in intent_lower for word in ["看好", "买入", "yes", "会发生", "支持"]):
+                if yes_price < 0.4:
+                    return "BUY_YES", f"您看好该事件，当前 YES 价格 ${yes_price:.2f} 处于低位，可考虑买入"
+                elif yes_price > 0.7:
+                    return "HOLD", f"您看好该事件，但 YES 价格已达 ${yes_price:.2f}，建议观望或等待回调"
+                else:
+                    return "BUY_YES", f"您看好该事件，当前 YES 价格 ${yes_price:.2f}，可适量买入"
+            
+            if any(word in intent_lower for word in ["看空", "卖出", "no", "不会", "反对"]):
+                if no_price < 0.4:
+                    return "BUY_NO", f"您看空该事件，当前 NO 价格 ${no_price:.2f} 处于低位，可考虑买入 NO"
+                elif no_price > 0.7:
+                    return "HOLD", f"您看空该事件，但 NO 价格已达 ${no_price:.2f}，建议观望"
+                else:
+                    return "BUY_NO", f"您看空该事件，当前 NO 价格 ${no_price:.2f}，可适量买入 NO"
+        
+        # 无明确意图时的分析
+        if spread > 0.05:
+            return "ARBITRAGE", f"YES+NO 价格之和为 ${yes_price + no_price:.2f}，存在 {spread*100:.1f}% 的套利空间"
+        
+        if yes_price < 0.2:
+            return "SPECULATIVE_YES", f"YES 价格极低 (${yes_price:.2f})，高风险高回报机会"
+        
+        if no_price < 0.2:
+            return "SPECULATIVE_NO", f"NO 价格极低 (${no_price:.2f})，高风险高回报机会"
+        
+        return "HOLD", f"价格处于中间区域 (YES=${yes_price:.2f}, NO=${no_price:.2f})，建议观望等待明确信号"
+    
+    def _find_related_markets(self, market_slug: str, title: str) -> List[Dict]:
         """查找关联市场"""
         try:
-            # 获取当前市场信息
+            # 提取关键词
+            keywords = self._extract_keywords(title)
+            if not keywords:
+                return []
+            
             response = requests.get(
                 f"{self.gamma_base_url}/markets",
-                params={"slug": market_slug},
+                params={"_limit": 50, "active": True},
                 timeout=10
             )
             
@@ -140,237 +203,193 @@ class TradeAdvisor:
                 return []
             
             markets = response.json()
-            if not markets:
-                return []
+            related = []
             
-            current_market = markets[0]
-            event_slug = current_market.get("eventSlug", "")
-            
-            # 查找同事件的其他市场
-            if event_slug:
-                response = requests.get(
-                    f"{self.gamma_base_url}/events/{event_slug}",
-                    timeout=10
-                )
-                if response.status_code == 200:
-                    event = response.json()
-                    related = []
-                    for m in event.get("markets", [])[:limit]:
-                        if m.get("slug") != market_slug:
-                            related.append({
-                                "slug": m.get("slug"),
-                                "title": m.get("question", m.get("slug")),
-                                "relationship": "同事件市场"
-                            })
-                    return related
-            
-            # 如果没有事件关联，搜索相似关键词
-            keywords = market_slug.split("-")[:3]
-            search_term = " ".join(keywords)
-            
-            response = requests.get(
-                f"{self.gamma_base_url}/markets",
-                params={"_limit": limit * 2},
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                all_markets = response.json()
-                related = []
-                for m in all_markets:
-                    if m.get("slug") != market_slug:
-                        # 简单关键词匹配
-                        title = m.get("question", "").lower()
-                        if any(kw.lower() in title for kw in keywords):
-                            related.append({
-                                "slug": m.get("slug"),
-                                "title": m.get("question", m.get("slug")),
-                                "relationship": "关键词相关"
-                            })
-                            if len(related) >= limit:
-                                break
-                return related
+            for market in markets:
+                if market.get("slug") == market_slug:
+                    continue
                 
+                market_title = market.get("question", "").lower()
+                match_count = sum(1 for kw in keywords if kw in market_title)
+                
+                if match_count > 0:
+                    tokens = market.get("tokens", [])
+                    yes_price = 0.5
+                    for token in tokens:
+                        if token.get("outcome") == "Yes":
+                            yes_price = float(token.get("price", 0.5))
+                    
+                    # 推断关系
+                    relationship = self._infer_relationship(title.lower(), market_title)
+                    
+                    related.append({
+                        "slug": market.get("slug"),
+                        "title": market.get("question"),
+                        "yes_price": yes_price,
+                        "match_score": match_count,
+                        "inferred_relationship": relationship,
+                        "volume": market.get("volume", 0)
+                    })
+            
+            # 按匹配度排序
+            related.sort(key=lambda x: x["match_score"], reverse=True)
+            return related[:10]
+            
         except Exception as e:
             logger.error(f"查找关联市场失败: {e}")
-        
-        return []
+            return []
     
-    def detect_cross_market_opportunity(
-        self, 
-        market_a_slug: str, 
-        market_b_slug: str
-    ) -> Optional[ArbitrageOpportunity]:
-        """
-        检测跨市场套利机会
-        例如：如果 "Trump 当选" 为 YES，则 "共和党执政" 也应该高
-        """
-        market_a = self.get_market_price(market_a_slug)
-        market_b = self.get_market_price(market_b_slug)
+    def _extract_keywords(self, title: str) -> List[str]:
+        """提取关键词"""
+        # 移除常见停用词
+        stop_words = {"will", "the", "a", "an", "in", "on", "at", "to", "for", "of", "be", "is", "are", "was", "were"}
         
-        if not market_a or not market_b:
-            return None
+        # 简单分词
+        words = re.findall(r'\b[a-zA-Z]{3,}\b', title.lower())
+        keywords = [w for w in words if w not in stop_words]
         
-        # 简单相关性检测（实际应用中需要更复杂的逻辑）
-        price_diff = abs(market_a["yes_price"] - market_b["yes_price"])
+        # 保留专有名词（首字母大写）
+        proper_nouns = re.findall(r'\b[A-Z][a-zA-Z]+\b', title)
+        keywords.extend([n.lower() for n in proper_nouns])
         
-        if price_diff > 0.05:  # 5% 以上价差
-            higher = market_a if market_a["yes_price"] > market_b["yes_price"] else market_b
-            lower = market_b if market_a["yes_price"] > market_b["yes_price"] else market_a
-            
-            return ArbitrageOpportunity(
-                market_a_slug=higher["slug"],
-                market_b_slug=lower["slug"],
-                market_a_title=higher["title"],
-                market_b_title=lower["title"],
-                price_gap=round(price_diff, 4),
-                direction=f"{higher['slug']} 可能高估",
-                potential_profit=round(price_diff * 50, 2),  # 估算
-                confidence="中",
-                reasoning=f"关联市场存在 {price_diff*100:.1f}% 价差，{lower['title']} 可能存在价格滞后",
-                timestamp=datetime.now().isoformat()
-            )
-        
-        return None
+        return list(set(keywords))[:5]
     
-    def get_trading_advice(
-        self, 
-        market_slug: str,
-        user_context: Optional[str] = None
-    ) -> Dict:
-        """
-        获取交易建议
+    def _infer_relationship(self, title_a: str, title_b: str) -> str:
+        """推断两个市场的关系"""
+        # 包含关系关键词
+        if "before" in title_b or "by" in title_b:
+            return "包含"
         
-        Args:
-            market_slug: 市场 slug
-            user_context: 用户额外上下文（如"我看好 Trump"）
+        # 互斥关系
+        if "or" in title_a and "or" in title_b:
+            return "可能互斥"
         
-        Returns:
-            交易建议
-        """
-        result = {
-            "market": None,
-            "arbitrage": None,
-            "related_markets": [],
-            "advice": [],
-            "timestamp": datetime.now().isoformat()
-        }
+        # 时间相关
+        date_pattern = r'\b(202[4-9]|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\b'
+        if re.search(date_pattern, title_a) and re.search(date_pattern, title_b):
+            return "时间相关"
         
-        # 获取市场信息
-        market = self.get_market_price(market_slug)
-        if market:
-            result["market"] = market
-        else:
-            result["advice"].append({
-                "type": "error",
-                "message": f"未找到市场: {market_slug}"
+        return "可能相关"
+    
+    def _infer_relationships(self, market_info: Dict, related_markets: List[Dict]) -> List[Dict]:
+        """推断多个市场的关系"""
+        result = []
+        title_a = market_info.get("title", "").lower()
+        
+        for market in related_markets:
+            title_b = market.get("title", "").lower()
+            relationship = self._infer_relationship(title_a, title_b)
+            result.append({
+                "slug": market.get("slug"),
+                "title": market.get("title"),
+                "inferred_relationship": relationship
             })
-            return result
-        
-        # 检测 YES/NO 套利
-        arb = self.detect_yes_no_arbitrage(market_slug)
-        if arb:
-            result["arbitrage"] = asdict(arb)
-            if arb.potential_profit > 0:
-                result["advice"].append({
-                    "type": "arbitrage",
-                    "priority": "高",
-                    "message": arb.reasoning
-                })
-        
-        # 查找关联市场
-        related = self.find_related_markets(market_slug)
-        result["related_markets"] = related
-        
-        # 检测关联市场价差
-        for rel in related[:3]:
-            cross_arb = self.detect_cross_market_opportunity(market_slug, rel["slug"])
-            if cross_arb and cross_arb.price_gap > 0.03:
-                result["advice"].append({
-                    "type": "cross_market",
-                    "priority": "中",
-                    "message": cross_arb.reasoning,
-                    "related_market": rel["slug"]
-                })
-        
-        # 基于价格的简单建议
-        if market["yes_price"] < 0.2:
-            result["advice"].append({
-                "type": "value",
-                "priority": "低",
-                "message": f"YES 价格较低 ({market['yes_price']:.2f})，如果有利好消息可能快速上涨"
-            })
-        elif market["yes_price"] > 0.8:
-            result["advice"].append({
-                "type": "caution",
-                "priority": "中",
-                "message": f"YES 价格较高 ({market['yes_price']:.2f})，上涨空间有限，注意风险"
-            })
-        
-        # 如果有 LLM，使用 LLM 生成更智能的建议
-        if self.openai_api_key and user_context:
-            llm_advice = self._get_llm_advice(market, related, user_context)
-            if llm_advice:
-                result["advice"].append({
-                    "type": "ai_analysis",
-                    "priority": "高",
-                    "message": llm_advice
-                })
         
         return result
     
-    def _get_llm_advice(
-        self, 
-        market: Dict, 
-        related: List[Dict],
-        user_context: str
-    ) -> Optional[str]:
-        """使用 LLM 生成交易建议"""
-        prompt = f"""作为 Polymarket 预测市场分析师，根据以下信息提供简洁的交易建议。
-
-## 目标市场
-- 标题: {market['title']}
-- YES 价格: ${market['yes_price']:.2f}
-- NO 价格: ${market['no_price']:.2f}
-- 交易量: ${market.get('volume', 0):,.0f}
-
-## 关联市场
-{json.dumps(related[:3], indent=2, ensure_ascii=False) if related else "无"}
-
-## 用户意图
-{user_context}
-
-请用2-3句话给出具体、可操作的交易建议。考虑：
-1. 当前价格是否合理
-2. 关联市场是否有套利机会
-3. 用户意图与市场走势是否匹配
-"""
+    def _scan_market_arbitrage(self, market_info: Dict) -> List[ArbitrageOpportunity]:
+        """扫描市场套利机会"""
+        opportunities = []
         
-        try:
-            response = requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.openai_api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": "gpt-4o-mini",
-                    "messages": [
-                        {"role": "system", "content": "你是专业的预测市场分析师，提供简洁、实用的交易建议。用中文回复。"},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0.7,
-                    "max_tokens": 200
-                },
-                timeout=30
+        yes_price = market_info.get("yes_price", 0.5)
+        no_price = market_info.get("no_price", 0.5)
+        spread = yes_price + no_price - 1.0
+        
+        # YES + NO 套利
+        if spread > 0.02:
+            opp = ArbitrageOpportunity(
+                type="yes_no_spread",
+                market_slug=market_info.get("slug", ""),
+                market_title=market_info.get("title", ""),
+                yes_price=yes_price,
+                no_price=no_price,
+                spread=round(spread * 100, 2),
+                potential_profit=round(spread * 100, 2),
+                confidence="高" if spread > 0.05 else "中",
+                details=f"买入 YES (${yes_price:.2f}) + NO (${no_price:.2f}) 总成本 ${yes_price + no_price:.2f}，结算后必得 $1，套利 {spread*100:.1f}%",
+                reasoning="YES+NO 价格之和超过1，存在无风险套利",
+                timestamp=datetime.now().isoformat()
             )
-            
-            if response.status_code == 200:
-                return response.json()["choices"][0]["message"]["content"]
-        except Exception as e:
-            logger.error(f"LLM 建议生成失败: {e}")
+            opportunities.append(opp)
         
-        return None
+        return opportunities
+    
+    def _generate_risk_warnings(self, market_info: Dict, yes_price: float) -> List[str]:
+        """生成风险提示"""
+        warnings = []
+        
+        # 低流动性警告
+        liquidity = market_info.get("liquidity", 0)
+        if liquidity < 1000:
+            warnings.append("⚠️ 低流动性市场，大额交易可能造成滑点")
+        
+        # 极端价格警告
+        if yes_price < 0.1 or yes_price > 0.9:
+            warnings.append("⚠️ 价格处于极端区域，波动风险较大")
+        
+        # 临近结算警告
+        end_date = market_info.get("end_date")
+        if end_date:
+            try:
+                end = datetime.fromisoformat(end_date.replace('Z', '+00:00'))
+                if (end - datetime.now(end.tzinfo)).days < 7:
+                    warnings.append("⚠️ 市场临近结算，注意时间风险")
+            except:
+                pass
+        
+        # 低交易量警告
+        volume = market_info.get("volume", 0)
+        if volume < 10000:
+            warnings.append("⚠️ 交易量较低，市场关注度有限")
+        
+        return warnings
+    
+    def _calculate_confidence(self, market_info: Dict, related: List[Dict], 
+                             arb_opportunities: List[ArbitrageOpportunity]) -> str:
+        """计算建议置信度"""
+        score = 0
+        
+        # 高流动性加分
+        if market_info.get("liquidity", 0) > 10000:
+            score += 2
+        elif market_info.get("liquidity", 0) > 1000:
+            score += 1
+        
+        # 有关联市场加分
+        if len(related) > 3:
+            score += 1
+        
+        # 有套利机会加分
+        if arb_opportunities:
+            score += 2
+        
+        # 高交易量加分
+        if market_info.get("volume", 0) > 100000:
+            score += 1
+        
+        if score >= 4:
+            return "高"
+        elif score >= 2:
+            return "中"
+        else:
+            return "低"
+    
+    def _advice_to_dict(self, advice: TradingAdvice) -> Dict:
+        """将建议转换为字典"""
+        return {
+            "market_slug": advice.market_slug,
+            "market_title": advice.market_title,
+            "current_yes_price": advice.current_yes_price,
+            "current_no_price": advice.current_no_price,
+            "recommendation": advice.recommendation,
+            "confidence": advice.confidence,
+            "reasoning": advice.reasoning,
+            "related_markets": advice.related_markets,
+            "arbitrage_opportunities": [asdict(o) for o in advice.arbitrage_opportunities],
+            "smart_money_signal": advice.smart_money_signal,
+            "risk_warnings": advice.risk_warnings,
+            "timestamp": datetime.now().isoformat()
+        }
     
     def scan_all_arbitrage(self, limit: int = 20) -> List[ArbitrageOpportunity]:
         """扫描所有市场的套利机会"""
@@ -379,257 +398,196 @@ class TradeAdvisor:
         try:
             response = requests.get(
                 f"{self.gamma_base_url}/markets",
-                params={"_limit": limit, "active": True},
+                params={"_limit": limit * 2, "active": True},
                 timeout=15
             )
             
-            if response.status_code == 200:
-                markets = response.json()
-                for market in markets:
-                    slug = market.get("slug")
-                    if slug:
-                        arb = self.detect_yes_no_arbitrage(slug)
-                        if arb and arb.potential_profit > 0:
-                            opportunities.append(arb)
+            if response.status_code != 200:
+                return opportunities
+            
+            markets = response.json()
+            
+            for market in markets[:limit]:
+                tokens = market.get("tokens", [])
+                yes_price = no_price = 0.5
+                
+                for token in tokens:
+                    if token.get("outcome") == "Yes":
+                        yes_price = float(token.get("price", 0.5))
+                    elif token.get("outcome") == "No":
+                        no_price = float(token.get("price", 0.5))
+                
+                spread = yes_price + no_price - 1.0
+                
+                if spread > 0.02:
+                    opp = ArbitrageOpportunity(
+                        type="yes_no_spread",
+                        market_slug=market.get("slug", ""),
+                        market_title=market.get("question", ""),
+                        yes_price=yes_price,
+                        no_price=no_price,
+                        spread=round(spread * 100, 2),
+                        potential_profit=round(spread * 100, 2),
+                        confidence="高" if spread > 0.05 else "中",
+                        details=f"YES=${yes_price:.2f} + NO=${no_price:.2f} = ${yes_price+no_price:.2f}",
+                        reasoning="价格之和超过1",
+                        timestamp=datetime.now().isoformat()
+                    )
+                    opportunities.append(opp)
+            
+            # 按利润排序
+            opportunities.sort(key=lambda x: x.potential_profit, reverse=True)
+            
         except Exception as e:
-            logger.error(f"扫描套利机会失败: {e}")
+            logger.error(f"扫描套利失败: {e}")
         
-        # 按收益排序
-        opportunities.sort(key=lambda x: x.potential_profit, reverse=True)
         return opportunities
     
-    def detect_price_lag(
-        self, 
-        primary_market: str, 
-        dependent_market: str,
-        relationship: str = "包含"
-    ) -> Optional[Dict]:
-        """
-        检测价格滞后
-        当主市场价格变化时，检测从属市场是否存在滞后
+    def detect_cross_market_opportunity(self, market_a: str, market_b: str) -> Optional[ArbitrageOpportunity]:
+        """检测跨市场套利机会"""
+        info_a = self._fetch_market(market_a)
+        info_b = self._fetch_market(market_b)
         
-        Args:
-            primary_market: 主市场 slug (如 "trump-wins")
-            dependent_market: 从属市场 slug (如 "republican-controls-white-house")
-            relationship: 关系类型 ("包含", "互斥", "正相关", "负相关")
-        
-        Returns:
-            价格滞后分析结果
-        """
-        primary = self.get_market_price(primary_market)
-        dependent = self.get_market_price(dependent_market)
-        
-        if not primary or not dependent:
+        if not info_a or not info_b:
             return None
         
-        result = {
-            "primary_market": primary,
-            "dependent_market": dependent,
-            "relationship": relationship,
-            "lag_detected": False,
-            "opportunity": None,
-            "reasoning": ""
-        }
+        # 分析价格关系
+        yes_a = info_a.get("yes_price", 0.5)
+        yes_b = info_b.get("yes_price", 0.5)
         
-        # 根据关系类型计算预期价格
-        if relationship == "包含":
-            # A 发生 → B 必发生，所以 P(B) >= P(A)
-            expected_min = primary["yes_price"]
-            actual = dependent["yes_price"]
-            
-            if actual < expected_min - 0.03:  # 3% 阈值
-                lag = expected_min - actual
-                result["lag_detected"] = True
-                result["opportunity"] = {
-                    "action": f"买入 {dependent_market} YES",
-                    "expected_profit": f"{lag * 100:.1f}%",
-                    "confidence": "高" if lag > 0.05 else "中"
-                }
-                result["reasoning"] = (
-                    f"逻辑蕴含关系：如果 '{primary['title']}' 发生 (当前 {primary['yes_price']:.0%})，"
-                    f"则 '{dependent['title']}' 必然发生。但后者仅 {actual:.0%}，存在 {lag*100:.1f}% 价格滞后。"
-                )
+        # 如果 A 包含 B，则 P(A) <= P(B)
+        # 如果价格异常，可能存在套利
+        price_diff = abs(yes_a - yes_b)
         
-        elif relationship == "互斥":
-            # A 和 B 不能同时发生，P(A) + P(B) <= 1
-            total = primary["yes_price"] + dependent["yes_price"]
-            if total > 1.05:  # 5% 超额
-                result["lag_detected"] = True
-                result["opportunity"] = {
-                    "action": f"做空高估的一方",
-                    "expected_profit": f"{(total - 1) * 100:.1f}%",
-                    "confidence": "中"
-                }
-                result["reasoning"] = (
-                    f"互斥关系：'{primary['title']}' 和 '{dependent['title']}' 不能同时发生，"
-                    f"但两者 YES 价格之和为 {total:.0%}，超过 100%，存在套利空间。"
-                )
+        if price_diff > 0.1:
+            return ArbitrageOpportunity(
+                type="cross_market",
+                market_slug=f"{market_a} vs {market_b}",
+                market_title=f"{info_a.get('title', '')} vs {info_b.get('title', '')}",
+                yes_price=yes_a,
+                no_price=yes_b,
+                spread=round(price_diff * 100, 2),
+                potential_profit=round(price_diff * 50, 2),
+                confidence="低",
+                details=f"市场A YES=${yes_a:.2f}, 市场B YES=${yes_b:.2f}",
+                reasoning="两个相关市场价格差异较大，可能存在套利机会，但需人工验证逻辑关系",
+                timestamp=datetime.now().isoformat()
+            )
         
-        elif relationship == "正相关":
-            # 正相关市场应该价格接近
-            diff = abs(primary["yes_price"] - dependent["yes_price"])
-            if diff > 0.1:  # 10% 差异
-                lower = primary if primary["yes_price"] < dependent["yes_price"] else dependent
-                result["lag_detected"] = True
-                result["opportunity"] = {
-                    "action": f"买入 {lower['slug']} YES",
-                    "expected_profit": f"{diff * 100:.1f}%",
-                    "confidence": "中"
-                }
-                result["reasoning"] = (
-                    f"正相关市场存在 {diff*100:.1f}% 价差，'{lower['title']}' 可能被低估。"
-                )
-        
-        return result
+        return None
     
-    def generate_smart_alert(
-        self, 
-        watched_market: str
-    ) -> List[Dict]:
-        """
-        为关注的市场生成智能提醒
-        检测关联市场的价格滞后，自动推送机会
+    def detect_price_lag(self, market_a: str, market_b: str, relationship: str) -> Dict:
+        """检测价格滞后"""
+        info_a = self._fetch_market(market_a)
+        info_b = self._fetch_market(market_b)
         
-        Args:
-            watched_market: 用户关注的市场 slug
+        if not info_a or not info_b:
+            return {"detected": False, "reason": "无法获取市场信息"}
         
-        Returns:
-            提醒列表
-        """
+        yes_a = info_a.get("yes_price", 0.5)
+        yes_b = info_b.get("yes_price", 0.5)
+        
+        # 基于关系类型判断价格合理性
+        if relationship == "包含":
+            # A 包含 B 意味着 P(A) <= P(B)
+            if yes_a > yes_b + 0.05:
+                return {
+                    "detected": True,
+                    "type": "包含关系价格异常",
+                    "expected": f"P(A) <= P(B)",
+                    "actual": f"P(A)={yes_a:.2f} > P(B)={yes_b:.2f}",
+                    "opportunity": "买入 B 卖出 A"
+                }
+        
+        elif relationship == "可能互斥":
+            # 互斥意味着 P(A) + P(B) <= 1
+            if yes_a + yes_b > 1.05:
+                return {
+                    "detected": True,
+                    "type": "互斥关系价格异常",
+                    "expected": f"P(A) + P(B) <= 1",
+                    "actual": f"P(A)+P(B)={yes_a + yes_b:.2f}",
+                    "opportunity": "同时买入两者的 NO"
+                }
+        
+        return {"detected": False, "reason": "未检测到明显价格滞后"}
+    
+    def generate_smart_alert(self, watched_market: str) -> List[Dict]:
+        """为关注的市场生成智能提醒"""
         alerts = []
         
-        # 获取关注市场信息
-        market = self.get_market_price(watched_market)
-        if not market:
-            return alerts
+        market_info = self._fetch_market(watched_market)
+        if not market_info:
+            return [{"type": "error", "message": f"无法获取市场 {watched_market}"}]
+        
+        # 检查 YES+NO 套利
+        yes_price = market_info.get("yes_price", 0.5)
+        no_price = market_info.get("no_price", 0.5)
+        spread = yes_price + no_price - 1.0
+        
+        if spread > 0.02:
+            alerts.append({
+                "type": "arbitrage",
+                "severity": "high" if spread > 0.05 else "medium",
+                "title": "发现套利机会",
+                "message": f"YES+NO 价差达到 {spread*100:.1f}%，可考虑套利",
+                "action": f"同时买入 YES (${yes_price:.2f}) 和 NO (${no_price:.2f})"
+            })
         
         # 查找关联市场
-        related = self.find_related_markets(watched_market, limit=10)
+        related = self._find_related_markets(watched_market, market_info.get("title", ""))
         
-        # 使用 LLM 推断关系类型（如果可用）
-        relationships = self._infer_relationships(market, related)
+        for rel in related[:3]:
+            rel_info = self._fetch_market(rel["slug"])
+            if rel_info:
+                lag = self.detect_price_lag(watched_market, rel["slug"], rel.get("inferred_relationship", "相关"))
+                if lag.get("detected"):
+                    alerts.append({
+                        "type": "price_lag",
+                        "severity": "medium",
+                        "title": f"与 {rel['slug']} 存在价格滞后",
+                        "message": lag.get("actual", ""),
+                        "action": lag.get("opportunity", "观察")
+                    })
         
-        for rel in relationships:
-            lag_result = self.detect_price_lag(
-                watched_market, 
-                rel["slug"], 
-                rel.get("inferred_relationship", "相关")
-            )
-            
-            if lag_result and lag_result.get("lag_detected"):
-                alerts.append({
-                    "type": "price_lag",
-                    "priority": "高" if lag_result["opportunity"]["confidence"] == "高" else "中",
-                    "watched_market": market["title"],
-                    "related_market": rel.get("title", rel["slug"]),
-                    "opportunity": lag_result["opportunity"],
-                    "reasoning": lag_result["reasoning"],
-                    "timestamp": datetime.now().isoformat()
-                })
-        
-        # 检查 YES/NO 套利
-        arb = self.detect_yes_no_arbitrage(watched_market)
-        if arb and arb.potential_profit > 1:
+        # 极端价格提醒
+        if yes_price < 0.1:
             alerts.append({
-                "type": "yes_no_arbitrage",
-                "priority": "高",
-                "watched_market": market["title"],
-                "opportunity": {
-                    "action": "买入 YES + NO",
-                    "expected_profit": f"{arb.potential_profit:.1f}%"
-                },
-                "reasoning": arb.reasoning,
-                "timestamp": datetime.now().isoformat()
+                "type": "extreme_price",
+                "severity": "low",
+                "title": "YES 价格极低",
+                "message": f"当前 YES 价格仅 ${yes_price:.2f}，可能是投机机会",
+                "action": "评估事件发生可能性"
+            })
+        elif yes_price > 0.9:
+            alerts.append({
+                "type": "extreme_price",
+                "severity": "low",
+                "title": "YES 价格极高",
+                "message": f"当前 YES 价格达 ${yes_price:.2f}，市场高度确定",
+                "action": "注意是否有意外风险"
             })
         
         return alerts
-    
-    def _infer_relationships(
-        self, 
-        primary_market: Dict, 
-        related_markets: List[Dict]
-    ) -> List[Dict]:
-        """使用 LLM 推断市场之间的逻辑关系"""
-        if not self.openai_api_key or not related_markets:
-            # 没有 API Key，返回默认相关性
-            return [{"slug": m["slug"], "title": m.get("title", ""), "inferred_relationship": "相关"} for m in related_markets]
-        
-        prompt = f"""分析以下预测市场之间的逻辑关系。
-
-主市场: {primary_market['title']}
-
-关联市场:
-{json.dumps([{"slug": m["slug"], "title": m.get("title", "")} for m in related_markets], indent=2, ensure_ascii=False)}
-
-对于每个关联市场，判断它与主市场的关系类型：
-- "包含": 主市场发生 → 关联市场必发生
-- "被包含": 关联市场发生 → 主市场必发生
-- "互斥": 两者不能同时发生
-- "正相关": 两者大概率同向变动
-- "负相关": 两者大概率反向变动
-- "独立": 无明显关系
-
-用 JSON 数组回复：
-[{{"slug": "...", "relationship": "包含/互斥/正相关/..."}}]
-"""
-        
-        try:
-            response = requests.post(
-                "https://api.openai.com/v1/chat/completions",
-                headers={
-                    "Authorization": f"Bearer {self.openai_api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": "gpt-4o-mini",
-                    "messages": [
-                        {"role": "system", "content": "你是逻辑分析专家，擅长分析事件之间的因果和逻辑关系。"},
-                        {"role": "user", "content": prompt}
-                    ],
-                    "temperature": 0.2,
-                    "max_tokens": 500
-                },
-                timeout=30
-            )
-            
-            if response.status_code == 200:
-                content = response.json()["choices"][0]["message"]["content"]
-                try:
-                    start = content.find("[")
-                    end = content.rfind("]") + 1
-                    if start >= 0 and end > start:
-                        relationships = json.loads(content[start:end])
-                        # 合并结果
-                        result = []
-                        for m in related_markets:
-                            rel = next((r for r in relationships if r["slug"] == m["slug"]), None)
-                            result.append({
-                                "slug": m["slug"],
-                                "title": m.get("title", ""),
-                                "inferred_relationship": rel.get("relationship", "相关") if rel else "相关"
-                            })
-                        return result
-                except:
-                    pass
-        except Exception as e:
-            logger.error(f"LLM 关系推断失败: {e}")
-        
-        return [{"slug": m["slug"], "title": m.get("title", ""), "inferred_relationship": "相关"} for m in related_markets]
 
 
-# 测试代码
+# 测试
 if __name__ == "__main__":
     advisor = TradeAdvisor()
     
-    # 测试获取交易建议
     print("=" * 60)
-    print("交易建议测试")
+    print("扫描套利机会:")
     print("=" * 60)
     
-    result = advisor.get_trading_advice(
-        "will-there-be-another-us-government-shutdown-by-january-31",
-        user_context="我认为政府不会关门"
-    )
+    opportunities = advisor.scan_all_arbitrage(limit=10)
+    for opp in opportunities[:5]:
+        print(f"  {opp.market_slug}: {opp.potential_profit}% ({opp.details})")
     
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+    print("\n" + "=" * 60)
+    print("测试交易建议:")
+    print("=" * 60)
+    
+    import json
+    advice = advisor.get_trading_advice("will-trump-win-2024", "我看好 Trump")
+    print(json.dumps(advice, indent=2, ensure_ascii=False))
 

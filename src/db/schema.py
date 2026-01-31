@@ -1,229 +1,283 @@
 """
-数据库Schema定义 - PolyMind MCP
-支持 Polymarket 市场和交易数据存储
+数据库 Schema 定义
+支持数据库迁移，兼容旧表结构
 """
-import sqlite3
-from typing import Optional, Dict, List, Any
-import logging
 import os
-from datetime import datetime
+import sqlite3
+from typing import Optional
 
-logger = logging.getLogger(__name__)
-
-
-# SQL Schema 定义
-SCHEMA_SQL = """
--- 事件表：存储 Polymarket 事件信息
-CREATE TABLE IF NOT EXISTS events (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    slug VARCHAR UNIQUE NOT NULL,
-    title VARCHAR,
-    description TEXT,
-    neg_risk BOOLEAN DEFAULT 0,
-    status VARCHAR DEFAULT 'active',
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- 市场表：存储市场参数和 TokenId
-CREATE TABLE IF NOT EXISTS markets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    event_id INTEGER,
-    slug VARCHAR UNIQUE,
-    condition_id VARCHAR UNIQUE NOT NULL,
-    question_id VARCHAR,
-    oracle VARCHAR,
-    collateral_token VARCHAR DEFAULT '0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174',
-    yes_token_id VARCHAR NOT NULL,
-    no_token_id VARCHAR NOT NULL,
-    enable_neg_risk BOOLEAN DEFAULT 0,
-    outcome_slot_count INTEGER DEFAULT 2,
-    status VARCHAR DEFAULT 'active',
-    title VARCHAR,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(event_id) REFERENCES events(id)
-);
-
--- 交易表：存储链上 OrderFilled 事件解析结果
-CREATE TABLE IF NOT EXISTS trades (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    market_id INTEGER,
-    tx_hash VARCHAR NOT NULL,
-    log_index INTEGER NOT NULL,
-    block_number INTEGER,
-    maker VARCHAR,
-    taker VARCHAR,
-    maker_asset_id VARCHAR,
-    taker_asset_id VARCHAR,
-    maker_amount VARCHAR,
-    taker_amount VARCHAR,
-    fee VARCHAR,
-    side VARCHAR,
-    outcome VARCHAR,
-    price DECIMAL(20,8),
-    size DECIMAL(20,8),
-    token_id VARCHAR,
-    exchange VARCHAR,
-    order_hash VARCHAR,
-    timestamp TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(tx_hash, log_index),
-    FOREIGN KEY(market_id) REFERENCES markets(id)
-);
-
--- 同步状态表：记录索引器进度
-CREATE TABLE IF NOT EXISTS sync_state (
-    key VARCHAR PRIMARY KEY,
-    last_block INTEGER DEFAULT 0,
-    total_trades INTEGER DEFAULT 0,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- 交易者画像表：存储分析结果
-CREATE TABLE IF NOT EXISTS trader_profiles (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    address VARCHAR UNIQUE NOT NULL,
-    total_trades INTEGER DEFAULT 0,
-    total_volume DECIMAL(20,8) DEFAULT 0,
-    win_count INTEGER DEFAULT 0,
-    loss_count INTEGER DEFAULT 0,
-    win_rate DECIMAL(5,4) DEFAULT 0,
-    labels TEXT,
-    trading_style VARCHAR,
-    last_trade_at TIMESTAMP,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-
--- 索引优化
-CREATE INDEX IF NOT EXISTS idx_trades_market_id ON trades(market_id);
-CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp);
-CREATE INDEX IF NOT EXISTS idx_trades_block_number ON trades(block_number);
-CREATE INDEX IF NOT EXISTS idx_trades_maker ON trades(maker);
-CREATE INDEX IF NOT EXISTS idx_trades_taker ON trades(taker);
-CREATE INDEX IF NOT EXISTS idx_trades_token_id ON trades(token_id);
-CREATE INDEX IF NOT EXISTS idx_markets_condition_id ON markets(condition_id);
-CREATE INDEX IF NOT EXISTS idx_markets_yes_token ON markets(yes_token_id);
-CREATE INDEX IF NOT EXISTS idx_markets_no_token ON markets(no_token_id);
-CREATE INDEX IF NOT EXISTS idx_trader_profiles_address ON trader_profiles(address);
-"""
+DB_PATH = os.getenv("DB_PATH", "data/polymarket.db")
 
 
-def init_db(db_path: str) -> sqlite3.Connection:
+def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
+    """获取数据库连接"""
+    path = db_path or DB_PATH
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return sqlite3.connect(path)
+
+
+def get_table_columns(cursor, table_name: str) -> set:
+    """获取表的所有列名"""
+    cursor.execute(f"PRAGMA table_info({table_name})")
+    return {row[1] for row in cursor.fetchall()}
+
+
+def table_exists(cursor, table_name: str) -> bool:
+    """检查表是否存在"""
+    cursor.execute("""
+        SELECT name FROM sqlite_master 
+        WHERE type='table' AND name=?
+    """, (table_name,))
+    return cursor.fetchone() is not None
+
+
+def init_db(db_path: Optional[str] = None):
     """
     初始化数据库
+    - 创建不存在的表
+    - 安全地添加缺失的列
+    - 创建索引（仅当列存在时）
+    """
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
     
-    Args:
-        db_path: 数据库文件路径
-        
-    Returns:
-        数据库连接
-    """
-    try:
-        # 确保目录存在
-        db_dir = os.path.dirname(db_path)
-        if db_dir and not os.path.exists(db_dir):
-            os.makedirs(db_dir, exist_ok=True)
-            logger.info(f"创建数据库目录: {db_dir}")
-        
-        conn = sqlite3.connect(db_path, check_same_thread=False)
-        conn.row_factory = sqlite3.Row  # 返回字典形式的行
-        cursor = conn.cursor()
-        
-        # 启用外键约束
-        cursor.execute("PRAGMA foreign_keys = ON")
-        
-        # 创建表和索引
-        cursor.executescript(SCHEMA_SQL)
-        
-        # 初始化同步状态
-        cursor.execute("""
-            INSERT OR IGNORE INTO sync_state (key, last_block, total_trades, updated_at)
-            VALUES ('indexer', 0, 0, ?)
-        """, (datetime.now().isoformat(),))
-        
-        conn.commit()
-        logger.info(f"✓ 数据库初始化成功: {db_path}")
-        return conn
-        
-    except Exception as e:
-        logger.error(f"数据库初始化失败: {e}")
-        raise
-
-
-def get_connection(db_path: str) -> sqlite3.Connection:
-    """
-    获取数据库连接
+    # =========================================================================
+    # 创建 markets 表
+    # =========================================================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS markets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            condition_id TEXT UNIQUE,
+            slug TEXT UNIQUE,
+            question TEXT,
+            description TEXT,
+            category TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            volume REAL DEFAULT 0,
+            liquidity REAL DEFAULT 0,
+            yes_price REAL DEFAULT 0.5,
+            no_price REAL DEFAULT 0.5,
+            active INTEGER DEFAULT 1,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     
-    Args:
-        db_path: 数据库文件路径
-        
-    Returns:
-        数据库连接
-    """
-    conn = sqlite3.connect(db_path, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def dict_from_row(row: sqlite3.Row) -> Dict[str, Any]:
-    """将 sqlite3.Row 转换为字典"""
-    if row is None:
-        return None
-    return dict(row)
-
-
-def check_db_health(db_path: str) -> Dict[str, Any]:
-    """
-    检查数据库健康状态
+    # =========================================================================
+    # 创建 trades 表
+    # =========================================================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            tx_hash TEXT,
+            log_index INTEGER DEFAULT 0,
+            block_number INTEGER,
+            timestamp TEXT,
+            maker TEXT,
+            taker TEXT,
+            side TEXT,
+            outcome TEXT,
+            price REAL,
+            size REAL,
+            maker_amount TEXT,
+            taker_amount TEXT,
+            fee_amount TEXT,
+            token_id TEXT,
+            condition_id TEXT,
+            market_slug TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
     
-    Args:
-        db_path: 数据库文件路径
+    # 检查并添加 trades 表缺失的列
+    if table_exists(cursor, 'trades'):
+        existing_columns = get_table_columns(cursor, 'trades')
         
-    Returns:
-        健康状态信息
-    """
-    try:
-        if not os.path.exists(db_path):
-            return {
-                "healthy": False,
-                "error": "数据库文件不存在",
-                "db_path": db_path
-            }
-        
-        conn = get_connection(db_path)
-        cursor = conn.cursor()
-        
-        # 统计各表数据量
-        tables = ["events", "markets", "trades", "sync_state", "trader_profiles"]
-        counts = {}
-        
-        for table in tables:
-            try:
-                cursor.execute(f"SELECT COUNT(*) FROM {table}")
-                counts[table] = cursor.fetchone()[0]
-            except:
-                counts[table] = 0
-        
-        # 获取同步状态
-        cursor.execute("SELECT * FROM sync_state WHERE key = 'indexer'")
-        sync_row = cursor.fetchone()
-        sync_state = dict_from_row(sync_row) if sync_row else {}
-        
-        conn.close()
-        
-        return {
-            "healthy": True,
-            "db_path": db_path,
-            "table_counts": counts,
-            "sync_state": sync_state,
-            "file_size_mb": round(os.path.getsize(db_path) / 1024 / 1024, 2)
+        # 需要添加的列及其定义
+        columns_to_add = {
+            'market_slug': 'TEXT',
+            'outcome': 'TEXT',
+            'price': 'REAL',
+            'size': 'REAL',
+            'log_index': 'INTEGER DEFAULT 0',
+            'fee_amount': 'TEXT',
+            'condition_id': 'TEXT',
         }
         
-    except Exception as e:
-        return {
-            "healthy": False,
-            "error": str(e),
-            "db_path": db_path
-        }
+        for col_name, col_type in columns_to_add.items():
+            if col_name not in existing_columns:
+                try:
+                    cursor.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
+                    print(f"   ✅ 添加列: trades.{col_name}")
+                except sqlite3.OperationalError:
+                    pass  # 列已存在
+    
+    # =========================================================================
+    # 创建 events 表
+    # =========================================================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT UNIQUE,
+            title TEXT,
+            slug TEXT,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # =========================================================================
+    # 创建 trader_profiles 表
+    # =========================================================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS trader_profiles (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            address TEXT UNIQUE,
+            trade_count INTEGER DEFAULT 0,
+            total_volume REAL DEFAULT 0,
+            win_rate REAL DEFAULT 0,
+            avg_position_size REAL DEFAULT 0,
+            labels TEXT,
+            style TEXT,
+            risk_level TEXT,
+            first_trade_at TEXT,
+            last_trade_at TEXT,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # =========================================================================
+    # 创建 traders 表（兼容旧版）
+    # =========================================================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS traders (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            address TEXT UNIQUE,
+            first_seen TEXT,
+            last_seen TEXT,
+            trade_count INTEGER DEFAULT 0,
+            total_volume REAL DEFAULT 0
+        )
+    """)
+    
+    # =========================================================================
+    # 创建 sync_state 表
+    # =========================================================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS sync_state (
+            id INTEGER PRIMARY KEY,
+            last_block INTEGER DEFAULT 0,
+            last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # =========================================================================
+    # 创建 indexer_state 表
+    # =========================================================================
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS indexer_state (
+            id INTEGER PRIMARY KEY,
+            last_block INTEGER DEFAULT 0,
+            last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+    
+    # =========================================================================
+    # 安全创建索引（仅当列存在时）
+    # =========================================================================
+    if table_exists(cursor, 'trades'):
+        columns = get_table_columns(cursor, 'trades')
+        
+        if 'maker' in columns:
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_maker ON trades(maker)")
+        if 'taker' in columns:
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_taker ON trades(taker)")
+        if 'block_number' in columns:
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_block ON trades(block_number)")
+        if 'market_slug' in columns:
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_market_slug ON trades(market_slug)")
+        if 'timestamp' in columns:
+            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp)")
+    
+    if table_exists(cursor, 'markets'):
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_markets_slug ON markets(slug)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_markets_condition ON markets(condition_id)")
+    
+    if table_exists(cursor, 'trader_profiles'):
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_profiles_address ON trader_profiles(address)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_profiles_win_rate ON trader_profiles(win_rate)")
+    
+    conn.commit()
+    conn.close()
+    
+    print("   ✅ 数据库初始化完成")
+
+
+def reset_db(db_path: Optional[str] = None):
+    """重置数据库（危险操作）"""
+    path = db_path or DB_PATH
+    if os.path.exists(path):
+        os.remove(path)
+        print(f"   ⚠️ 已删除旧数据库: {path}")
+    init_db(db_path)
+
+
+def get_last_indexed_block(db_path: Optional[str] = None) -> int:
+    """获取最后索引的区块号"""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    
+    # 尝试从 indexer_state 表获取
+    try:
+        cursor.execute("SELECT last_block FROM indexer_state WHERE id = 1")
+        row = cursor.fetchone()
+        if row:
+            conn.close()
+            return row[0]
+    except sqlite3.OperationalError:
+        pass
+    
+    # 尝试从 sync_state 表获取
+    try:
+        cursor.execute("SELECT last_block FROM sync_state WHERE id = 1")
+        row = cursor.fetchone()
+        if row:
+            conn.close()
+            return row[0]
+    except sqlite3.OperationalError:
+        pass
+    
+    conn.close()
+    return 0
+
+
+def set_last_indexed_block(block_number: int, db_path: Optional[str] = None):
+    """设置最后索引的区块号"""
+    conn = get_connection(db_path)
+    cursor = conn.cursor()
+    
+    # 更新 indexer_state 表
+    cursor.execute("""
+        INSERT INTO indexer_state (id, last_block, last_update) 
+        VALUES (1, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(id) DO UPDATE SET 
+            last_block = excluded.last_block,
+            last_update = CURRENT_TIMESTAMP
+    """, (block_number,))
+    
+    # 同时更新 sync_state 表（兼容性）
+    cursor.execute("""
+        INSERT INTO sync_state (id, last_block, last_update) 
+        VALUES (1, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(id) DO UPDATE SET 
+            last_block = excluded.last_block,
+            last_update = CURRENT_TIMESTAMP
+    """, (block_number,))
+    
+    conn.commit()
+    conn.close()
+
+
+if __name__ == "__main__":
+    init_db()
+    print("Database initialized successfully!")

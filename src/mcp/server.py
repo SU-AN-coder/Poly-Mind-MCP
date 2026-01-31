@@ -169,16 +169,77 @@ def create_app() -> Flask:
                 "/markets/<slug>/advice": "GET - 获取交易建议",
                 "/arbitrage": "GET - 扫描套利机会",
                 "/trader/<address>": "GET - 分析交易者",
-                "/hot": "GET - 热门市场"
+                "/hot": "GET - 热门市场",
+                "/stats": "GET - 仪表盘统计",
+                "/trades/recent": "GET - 最近交易"
             },
+            "quick_start": "python start.py demo",
             "timestamp": datetime.now().isoformat()
         })
     
     @app.route("/health", methods=["GET"])
     def health():
-        """健康检查"""
-        return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
-    
+        """增强版健康检查 - 包含数据状态"""
+        try:
+            from src.db.schema import get_connection
+            import os
+            
+            db_path = os.getenv("DB_PATH", "data/polymarket.db")
+            
+            # 检查数据库文件是否存在
+            if not os.path.exists(db_path):
+                return jsonify({
+                    "status": "warning",
+                    "message": "数据库不存在，请运行: python start.py demo",
+                    "data_ready": False,
+                    "trade_count": 0,
+                    "market_count": 0,
+                    "suggestion": "运行 python start.py demo 导入演示数据",
+                    "timestamp": datetime.now().isoformat()
+                })
+            
+            conn = get_connection(db_path)
+            cursor = conn.cursor()
+            
+            # 获取统计数据
+            cursor.execute("SELECT COUNT(*) FROM trades")
+            trade_count = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(*) FROM markets")
+            market_count = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT COUNT(DISTINCT maker) FROM trades")
+            trader_count = cursor.fetchone()[0]
+            
+            cursor.execute("SELECT last_block FROM indexer_state WHERE id = 1")
+            row = cursor.fetchone()
+            last_block = row[0] if row else 0
+            
+            conn.close()
+            
+            data_ready = trade_count >= 100
+            
+            return jsonify({
+                "status": "healthy" if data_ready else "warning",
+                "message": "系统正常，数据就绪" if data_ready else f"数据不足，还需 {100 - trade_count} 条交易",
+                "data_ready": data_ready,
+                "trade_count": trade_count,
+                "market_count": market_count,
+                "trader_count": trader_count,
+                "last_indexed_block": last_block,
+                "min_required_trades": 100,
+                "suggestion": None if data_ready else "运行: python start.py demo",
+                "timestamp": datetime.now().isoformat()
+            })
+        except Exception as e:
+            return jsonify({
+                "status": "error",
+                "message": str(e),
+                "data_ready": False,
+                "suggestion": "检查数据库配置",
+                "timestamp": datetime.now().isoformat()
+            }), 500
+
     # =========================================================================
     # MCP 标准接口
     # =========================================================================
@@ -382,6 +443,262 @@ def create_app() -> Flask:
             return jsonify({"error": str(e)}), 500
     
     # =========================================================================
+    # 仪表盘数据接口（真实数据）
+    # =========================================================================
+    @app.route("/stats", methods=["GET"])
+    def get_dashboard_stats():
+        """获取仪表盘统计数据（真实数据库数据）"""
+        try:
+            from src.db.schema import get_connection
+            db_path = os.getenv("DB_PATH", "data/polymarket.db")
+            conn = get_connection(db_path)
+            cursor = conn.cursor()
+            
+            # 获取交易统计
+            cursor.execute("SELECT COUNT(*) as total_trades FROM trades")
+            total_trades = cursor.fetchone()[0] or 0
+            
+            # 获取唯一交易者数量
+            cursor.execute("SELECT COUNT(DISTINCT maker) as unique_traders FROM trades")
+            unique_traders = cursor.fetchone()[0] or 0
+            
+            # 获取市场数量
+            cursor.execute("SELECT COUNT(*) as total_markets FROM markets")
+            total_markets = cursor.fetchone()[0] or 0
+            
+            # 获取总交易量估算 (基于 maker_amount + taker_amount)
+            cursor.execute("""
+                SELECT SUM(CAST(maker_amount AS REAL) + CAST(taker_amount AS REAL)) / 1e6 as volume
+                FROM trades
+            """)
+            result = cursor.fetchone()
+            total_volume = result[0] if result and result[0] else 0
+            
+            # 获取聪明钱数量 (胜率 > 55%)
+            cursor.execute("""
+                SELECT COUNT(*) FROM trader_profiles WHERE win_rate > 55
+            """)
+            smart_money_count = cursor.fetchone()[0] or 0
+            
+            conn.close()
+            
+            return jsonify({
+                "total_trades": total_trades,
+                "unique_traders": unique_traders,
+                "total_markets": total_markets,
+                "total_volume": round(total_volume, 2),
+                "smart_money_count": smart_money_count,
+                "avg_win_rate": 0.58,  # 可根据实际数据计算
+                "timestamp": datetime.now().isoformat()
+            })
+        except Exception as e:
+            logger.error(f"获取统计数据失败: {e}")
+            return jsonify({
+                "total_trades": 0,
+                "unique_traders": 0,
+                "total_markets": 0,
+                "total_volume": 0,
+                "smart_money_count": 0,
+                "avg_win_rate": 0.58,
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            })
+    
+    @app.route("/trades/recent", methods=["GET"])
+    def get_recent_trades():
+        """获取最近的真实交易数据"""
+        try:
+            limit = int(request.args.get("limit", 20))
+            from src.db.schema import get_connection
+            db_path = os.getenv("DB_PATH", "data/polymarket.db")
+            conn = get_connection(db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT 
+                    t.tx_hash,
+                    t.maker,
+                    t.taker,
+                    t.side,
+                    t.maker_amount,
+                    t.taker_amount,
+                    t.block_number,
+                    t.timestamp,
+                    m.slug as market_slug,
+                    m.question as market_title
+                FROM trades t
+                LEFT JOIN markets m ON t.market_slug = m.slug
+                ORDER BY t.block_number DESC
+                LIMIT ?
+            """, (limit,))
+            
+            trades = []
+            for row in cursor.fetchall():
+                # 计算价格 (简化计算)
+                maker_amount = float(row[4] or 0) / 1e6
+                taker_amount = float(row[5] or 0) / 1e6
+                price = taker_amount / maker_amount if maker_amount > 0 else 0
+                
+                trades.append({
+                    "tx_hash": row[0],
+                    "maker": row[1],
+                    "taker": row[2],
+                    "side": row[3] or "BUY",
+                    "maker_amount": maker_amount,
+                    "taker_amount": taker_amount,
+                    "price": round(price, 4),
+                    "size": round(maker_amount, 2),
+                    "block_number": row[6],
+                    "timestamp": row[7],
+                    "market_slug": row[8],
+                    "market_title": row[9]
+                })
+            
+            conn.close()
+            
+            return jsonify({
+                "trades": trades,
+                "count": len(trades),
+                "timestamp": datetime.now().isoformat()
+            })
+        except Exception as e:
+            logger.error(f"获取交易数据失败: {e}")
+            return jsonify({
+                "trades": [],
+                "count": 0,
+                "error": str(e),
+                "timestamp": datetime.now().isoformat()
+            })
+    
+    # =========================================================================
+    # PnL（盈亏）计算接口
+    # =========================================================================
+    @app.route("/trader/<address>/pnl", methods=["GET"])
+    def get_trader_pnl(address: str):
+        """获取交易者持仓盈亏"""
+        try:
+            from src.mcp.pnl_calculator import get_pnl_calculator
+            calculator = get_pnl_calculator()
+            portfolio = calculator.calculate_portfolio_pnl(address)
+            return jsonify({"success": True, "portfolio": portfolio.to_dict()})
+        except ImportError:
+            # PnL 模块未安装，返回占位数据
+            return jsonify({
+                "success": True,
+                "portfolio": {
+                    "address": address,
+                    "total_invested": 0,
+                    "total_current_value": 0,
+                    "unrealized_pnl": 0,
+                    "realized_pnl": 0,
+                    "positions": [],
+                    "message": "PnL 计算模块未启用"
+                },
+                "timestamp": datetime.now().isoformat()
+            })
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+    
+    @app.route("/trader/<address>/positions", methods=["GET"])
+    def get_trader_positions(address: str):
+        """获取交易者持仓列表"""
+        try:
+            from src.mcp.pnl_calculator import get_pnl_calculator
+            
+            include_closed = request.args.get("include_closed", "false").lower() == "true"
+            calculator = get_pnl_calculator()
+            positions = calculator.get_trader_positions(address, include_closed)
+            
+            return jsonify({
+                "success": True,
+                "address": address,
+                "positions": positions,
+                "count": len(positions),
+                "timestamp": datetime.now().isoformat()
+            })
+        except Exception as e:
+            logger.error(f"获取持仓失败: {e}")
+            return jsonify({"success": False, "error": str(e)}), 500
+    
+    @app.route("/leaderboard/pnl", methods=["GET"])
+    def get_pnl_leaderboard():
+        """获取盈亏排行榜"""
+        try:
+            from src.mcp.pnl_calculator import get_pnl_calculator
+            
+            market_slug = request.args.get("market")
+            limit = int(request.args.get("limit", 20))
+            
+            calculator = get_pnl_calculator()
+            leaderboard = calculator.get_market_pnl_leaderboard(market_slug, limit)
+            
+            return jsonify({
+                "success": True,
+                "market": market_slug or "all",
+                "leaderboard": leaderboard,
+                "count": len(leaderboard),
+                "timestamp": datetime.now().isoformat()
+            })
+        except Exception as e:
+            logger.error(f"获取排行榜失败: {e}")
+            return jsonify({"success": False, "error": str(e)}), 500
+    
+    # =========================================================================
+    # 缓存管理接口
+    # =========================================================================
+    @app.route("/cache/stats", methods=["GET"])
+    def get_cache_stats():
+        """获取缓存统计信息"""
+        try:
+            from src.cache import get_cache
+            cache = get_cache()
+            return jsonify({"success": True, "stats": cache.get_stats()})
+        except ImportError:
+            return jsonify({
+                "success": True,
+                "stats": {
+                    "enabled": False,
+                    "message": "缓存模块未安装"
+                }
+            })
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)})
+
+    @app.route("/cache/flush", methods=["POST"])
+    def flush_cache():
+        """清空缓存"""
+        try:
+            from src.cache import get_cache
+            cache = get_cache()
+            cache.flush()
+            return jsonify({
+                "success": True,
+                "message": "缓存已清空",
+                "timestamp": datetime.now().isoformat()
+            })
+        except Exception as e:
+            return jsonify({"success": False, "error": str(e)}), 500
+    
+    # =========================================================================
+    # WebSocket 状态接口
+    # =========================================================================
+    @app.route("/ws/stats", methods=["GET"])
+    def get_ws_stats():
+        """获取 WebSocket 连接统计"""
+        try:
+            from src.mcp.websocket import ws_manager
+            return jsonify({"success": True, "stats": ws_manager.get_stats()})
+        except ImportError:
+            return jsonify({
+                "success": True,
+                "stats": {
+                    "enabled": False,
+                    "connections": 0,
+                    "message": "WebSocket 未启用，需安装 flask-socketio"
+                }
+            })
+    
+    # =========================================================================
     # 请求监控中间件
     # =========================================================================
     @app.before_request
@@ -479,17 +796,47 @@ def create_app() -> Flask:
 
 
 class MCPServer:
-    """MCP Server 封装类"""
+    """MCP Server 封装类（支持 WebSocket）"""
     
-    def __init__(self, host: str = "0.0.0.0", port: int = 8080):
+    def __init__(self, host: str = "0.0.0.0", port: int = 8888):  # 改为 8888
         self.host = host
         self.port = port
         self.app = create_app()
+        self.socketio = None
     
-    def run(self, debug: bool = False):
+    def init_websocket(self):
+        """初始化 WebSocket 支持"""
+        try:
+            from src.mcp.websocket import init_websocket
+            self.socketio = init_websocket(self.app)
+            logger.info("✓ WebSocket 已启用")
+            return self.socketio
+        except ImportError:
+            logger.warning("flask-socketio 未安装，WebSocket 不可用")
+            return None
+        except Exception as e:
+            logger.error(f"WebSocket 初始化失败: {e}")
+            return None
+    
+    def run(self, debug: bool = False, use_websocket: bool = True):
         """启动服务器"""
         logger.info(f"Starting PolyMind MCP Server on {self.host}:{self.port}")
-        self.app.run(host=self.host, port=self.port, debug=debug)
+        
+        if use_websocket:
+            self.init_websocket()
+        
+        if self.socketio:
+            # 使用 SocketIO 运行（支持 WebSocket）
+            self.socketio.run(
+                self.app,
+                host=self.host,
+                port=self.port,
+                debug=debug,
+                allow_unsafe_werkzeug=True
+            )
+        else:
+            # 普通 Flask 运行
+            self.app.run(host=self.host, port=self.port, debug=debug)
 
 
 def main():
@@ -498,7 +845,7 @@ def main():
     
     parser = argparse.ArgumentParser(description="PolyMind MCP Server")
     parser.add_argument("--host", default="0.0.0.0", help="绑定地址")
-    parser.add_argument("--port", type=int, default=8080, help="端口号")
+    parser.add_argument("--port", type=int, default=8888, help="端口号")  # 改为 8888
     parser.add_argument("--debug", action="store_true", help="调试模式")
     
     args = parser.parse_args()

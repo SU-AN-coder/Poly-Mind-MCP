@@ -1,519 +1,589 @@
 """
-PolyMind MCP - REST API 服务器
-用于查询已索引的 Polymarket 交易数据
+PolyMind MCP API 服务器
 """
 import os
-import sys
 import logging
-from typing import Optional, List, Dict, Any
 from datetime import datetime
+from flask import Flask, jsonify, request
+from flask_cors import CORS
 
-from fastapi import FastAPI, Query, HTTPException, Path
-from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel
-import uvicorn
+from src.db.schema import get_connection
+from src.mcp.tools import PolymarketTools
+from .websocket_manager import ws_manager
 
-# 添加项目路径
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from db.schema import get_connection, init_db, check_db_health
-from indexer.store import DataStore
-
-# 日志配置
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 创建 FastAPI 应用
-app = FastAPI(
-    title="PolyMind 交易查询 API",
-    description="Polymarket 链上数据查询服务",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc"
-)
+app = Flask(__name__)
+CORS(app)
 
-# CORS 中间件
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-# 数据库路径
 DB_PATH = os.getenv("DB_PATH", "data/polymarket.db")
+tools = PolymarketTools()
+
+LARGE_TRADE_THRESHOLD = 1000
 
 
-# ========== 数据模型 ==========
-
-class TradeResponse(BaseModel):
-    """交易数据"""
-    id: int
-    market_id: Optional[int] = None
-    tx_hash: str
-    log_index: int
-    block_number: Optional[int] = None
-    maker: Optional[str] = None
-    taker: Optional[str] = None
-    side: Optional[str] = None
-    outcome: Optional[str] = None
-    price: Optional[float] = None
-    size: Optional[float] = None
-    token_id: Optional[str] = None
-    exchange: Optional[str] = None
-    timestamp: Optional[str] = None
+def get_db():
+    """获取数据库连接"""
+    return get_connection(DB_PATH)
 
 
-class MarketResponse(BaseModel):
-    """市场数据"""
-    id: int
-    slug: Optional[str] = None
-    condition_id: str
-    question_id: Optional[str] = None
-    oracle: Optional[str] = None
-    collateral_token: Optional[str] = None
-    yes_token_id: str
-    no_token_id: str
-    enable_neg_risk: Optional[bool] = False
-    status: Optional[str] = None
-    title: Optional[str] = None
-    created_at: Optional[str] = None
-
-
-class TradeListResponse(BaseModel):
-    """交易列表响应"""
-    total: int
-    limit: int
-    offset: int
-    trades: List[TradeResponse]
-
-
-class MarketStatsResponse(BaseModel):
-    """市场统计响应"""
-    trade_count: int
-    total_volume: float
-    avg_price: float
-    min_price: float
-    max_price: float
-    first_trade_at: Optional[str] = None
-    last_trade_at: Optional[str] = None
-
-
-class HealthResponse(BaseModel):
-    """健康检查响应"""
-    status: str
-    service: str
-    db_healthy: bool
-    markets_count: int
-    trades_count: int
-    timestamp: str
-
-
-# ========== 辅助函数 ==========
-
-def get_store() -> DataStore:
-    """获取 DataStore 实例"""
-    return DataStore(DB_PATH)
-
-
-# ========== API 端点 ==========
-
-@app.get("/", tags=["基础"])
-async def root() -> Dict[str, str]:
-    """API 根端点"""
-    return {
-        "name": "PolyMind 交易查询 API",
-        "version": "1.0.0",
-        "docs": "/docs",
-        "health": "/health"
-    }
-
-
-@app.get("/health", response_model=HealthResponse, tags=["基础"])
-async def health_check() -> HealthResponse:
-    """
-    健康检查端点
-    
-    返回系统状态和统计信息
-    """
+def safe_float(val, default=0.0):
+    """安全转换为浮点数"""
+    if val is None:
+        return default
     try:
-        health = check_db_health(DB_PATH)
-        
-        if health.get("healthy"):
-            counts = health.get("table_counts", {})
-            return HealthResponse(
-                status="ok",
-                service="PolyMind API",
-                db_healthy=True,
-                markets_count=counts.get("markets", 0),
-                trades_count=counts.get("trades", 0),
-                timestamp=datetime.now().isoformat()
-            )
+        return float(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def parse_trade_amount(maker_amount, taker_amount):
+    """解析交易金额 - 金额存储为微单位（1e6）"""
+    maker_amt = safe_float(maker_amount)
+    taker_amt = safe_float(taker_amount)
+    
+    if maker_amt < 1e6 and taker_amt > 1e6:
+        return maker_amt
+    elif taker_amt < 1e6 and maker_amt > 1e6:
+        return taker_amt
+    else:
+        smaller = min(maker_amt, taker_amt)
+        if smaller > 1e6:
+            return smaller / 1e6
+        return smaller
+
+
+def calculate_price(maker_amount, taker_amount, stored_price):
+    """计算价格 - 如果存储的价格无效，尝试计算"""
+    stored = safe_float(stored_price)
+    if stored > 0.001 and stored < 1.0:
+        return stored
+    
+    maker_amt = safe_float(maker_amount)
+    taker_amt = safe_float(taker_amount)
+    
+    if maker_amt > 0 and taker_amt > 0:
+        if maker_amt < taker_amt:
+            price = maker_amt / taker_amt
         else:
-            return HealthResponse(
-                status="degraded",
-                service="PolyMind API",
-                db_healthy=False,
-                markets_count=0,
-                trades_count=0,
-                timestamp=datetime.now().isoformat()
-            )
-            
-    except Exception as e:
-        logger.error(f"健康检查失败: {e}")
-        return HealthResponse(
-            status="error",
-            service="PolyMind API",
-            db_healthy=False,
-            markets_count=0,
-            trades_count=0,
-            timestamp=datetime.now().isoformat()
-        )
+            price = taker_amt / maker_amt
+        if 0.001 < price < 1.0:
+            return price
+    
+    return 0.5
 
 
-@app.get("/status", tags=["基础"])
-async def get_status() -> Dict[str, Any]:
-    """获取索引器状态"""
+@app.route('/health', methods=['GET'])
+def health_check():
     try:
-        store = get_store()
-        sync_state = store.get_sync_state()
-        overall = store.get_overall_stats()
-        
-        return {
-            "last_block": sync_state.get("last_block", 0),
-            "total_trades": sync_state.get("total_trades", 0),
-            "updated_at": sync_state.get("updated_at"),
-            "stats": overall
-        }
-        
+        conn = get_db()
+        conn.execute("SELECT 1")
+        conn.close()
+        return jsonify({
+            "status": "healthy", 
+            "timestamp": datetime.now().isoformat(),
+            "websocket": ws_manager.get_stats()
+        })
     except Exception as e:
-        logger.error(f"获取状态失败: {e}")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        return jsonify({"status": "unhealthy", "error": str(e)}), 500
 
 
-# ========== 事件端点 ==========
-
-@app.get("/events/{slug}", tags=["事件"])
-async def get_event(
-    slug: str = Path(..., description="事件 slug")
-) -> Dict[str, Any]:
-    """获取事件详情"""
-    store = get_store()
-    event = store.fetch_event_by_slug(slug)
-    
-    if not event:
-        raise HTTPException(status_code=404, detail=f"事件未找到: {slug}")
-    
-    return {"event": event}
-
-
-@app.get("/events/{slug}/markets", tags=["事件"])
-async def get_event_markets(
-    slug: str = Path(..., description="事件 slug"),
-    limit: int = Query(100, ge=1, le=1000),
-    offset: int = Query(0, ge=0)
-) -> Dict[str, Any]:
-    """获取事件下的所有市场"""
-    store = get_store()
-    event = store.fetch_event_by_slug(slug)
-    
-    if not event:
-        raise HTTPException(status_code=404, detail=f"事件未找到: {slug}")
-    
-    # 获取该事件下的市场
-    conn = get_connection(DB_PATH)
-    cursor = conn.cursor()
-    
+@app.route('/stats', methods=['GET'])
+def get_stats():
     try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT COUNT(*) FROM trades")
+        total_trades = cursor.fetchone()[0] or 0
+        
+        cursor.execute("SELECT COUNT(DISTINCT maker) FROM trades")
+        unique_traders = cursor.fetchone()[0] or 0
+        
         cursor.execute("""
-            SELECT * FROM markets 
-            WHERE event_id = ?
-            ORDER BY created_at DESC
-            LIMIT ? OFFSET ?
-        """, (event['id'], limit, offset))
+            SELECT SUM(
+                CASE 
+                    WHEN CAST(maker_amount AS REAL) < CAST(taker_amount AS REAL) 
+                    THEN CAST(maker_amount AS REAL)
+                    ELSE CAST(taker_amount AS REAL)
+                END
+            ) FROM trades
+        """)
+        total_volume_raw = cursor.fetchone()[0] or 0
+        if total_volume_raw > 1e9:
+            total_volume = total_volume_raw / 1e6
+        else:
+            total_volume = total_volume_raw
+        
+        cursor.execute("SELECT COUNT(*) FROM markets")
+        total_markets = cursor.fetchone()[0] or 0
+        
+        cursor.execute("""
+            SELECT COUNT(*) FROM trades 
+            WHERE (
+                CASE 
+                    WHEN CAST(maker_amount AS REAL) < CAST(taker_amount AS REAL) 
+                    THEN CAST(maker_amount AS REAL) / 1e6
+                    ELSE CAST(taker_amount AS REAL) / 1e6
+                END
+            ) >= ?
+        """, (LARGE_TRADE_THRESHOLD,))
+        large_trades_count = cursor.fetchone()[0] or 0
+        
+        conn.close()
+        
+        return jsonify({
+            "total_trades": total_trades,
+            "unique_traders": unique_traders,
+            "total_volume": round(total_volume, 2),
+            "total_markets": total_markets,
+            "large_trades_count": large_trades_count,
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        logger.error(f"获取统计数据失败: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/trades/recent', methods=['GET'])
+def get_recent_trades():
+    """获取最近交易"""
+    limit = request.args.get('limit', 20, type=int)
+    limit = min(limit, 100)
+    
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        # 直接查询，不依赖市场表关联
+        cursor.execute("""
+            SELECT 
+                t.tx_hash, t.maker, t.taker, t.side, t.outcome,
+                t.price, t.maker_amount, t.taker_amount, t.timestamp
+            FROM trades t
+            ORDER BY t.id DESC
+            LIMIT ?
+        """, (limit,))
         
         rows = cursor.fetchall()
-        markets = [dict(row) for row in rows]
-        
-        cursor.execute("SELECT COUNT(*) FROM markets WHERE event_id = ?", (event['id'],))
-        total = cursor.fetchone()[0]
-        
-        return {
-            "event": event,
-            "markets": markets,
-            "total": total,
-            "limit": limit,
-            "offset": offset
-        }
-        
-    finally:
         conn.close()
-
-
-# ========== 市场端点 ==========
-
-@app.get("/markets", tags=["市场"])
-async def list_markets(
-    limit: int = Query(100, ge=1, le=1000, description="返回数量"),
-    offset: int = Query(0, ge=0, description="偏移量")
-) -> Dict[str, Any]:
-    """获取市场列表"""
-    store = get_store()
-    markets = store.fetch_all_markets(limit=limit, offset=offset)
-    
-    return {
-        "markets": markets,
-        "limit": limit,
-        "offset": offset
-    }
-
-
-@app.get("/markets/{slug}", tags=["市场"])
-async def get_market(
-    slug: str = Path(..., description="市场 slug")
-) -> Dict[str, Any]:
-    """
-    获取市场详情和统计数据
-    
-    Args:
-        slug: 市场 slug
         
-    Returns:
-        市场信息和统计数据
-    """
-    logger.info(f"查询市场: {slug}")
-    
-    store = get_store()
-    market = store.fetch_market_by_slug(slug)
-    
-    if not market:
-        raise HTTPException(status_code=404, detail=f"市场未找到: {slug}")
-    
-    stats = store.get_market_stats(market_id=market['id'])
-    
-    return {
-        "market": market,
-        "stats": stats
-    }
-
-
-@app.get("/markets/{slug}/trades", response_model=TradeListResponse, tags=["市场"])
-async def get_market_trades(
-    slug: str = Path(..., description="市场 slug"),
-    limit: int = Query(100, ge=1, le=1000, description="返回数量"),
-    cursor: int = Query(0, ge=0, alias="offset", description="偏移量"),
-    from_block: Optional[int] = Query(None, alias="fromBlock", description="起始区块"),
-    to_block: Optional[int] = Query(None, alias="toBlock", description="结束区块")
-) -> TradeListResponse:
-    """
-    获取市场交易记录
-    
-    Args:
-        slug: 市场 slug
-        limit: 返回数量 (1-1000)
-        cursor: 分页偏移量
-        from_block: 起始区块过滤
-        to_block: 结束区块过滤
+        trades = []
+        for row in rows:
+            tx_hash, maker, taker, side, outcome, price, maker_amt, taker_amt, timestamp = row
+            
+            # 计算USDC金额
+            maker_amt = safe_float(maker_amt)
+            taker_amt = safe_float(taker_amt)
+            
+            if maker_amt < 1e6 and taker_amt > 1e6:
+                size = maker_amt
+            elif taker_amt < 1e6 and maker_amt > 1e6:
+                size = taker_amt
+            else:
+                smaller = min(maker_amt, taker_amt)
+                size = smaller / 1e6 if smaller > 1e6 else smaller
+            
+            # 计算价格
+            price_val = safe_float(price)
+            if price_val <= 0.001 or price_val >= 1.0:
+                if maker_amt > 0 and taker_amt > 0:
+                    if maker_amt < taker_amt:
+                        price_val = maker_amt / taker_amt
+                    else:
+                        price_val = taker_amt / maker_amt
+                    if price_val < 0.001 or price_val > 1.0:
+                        price_val = 0.5
+                else:
+                    price_val = 0.5
+            
+            trades.append({
+                "tx_hash": tx_hash or "",
+                "maker": maker or "",
+                "taker": taker or "",
+                "side": side or "BUY",
+                "outcome": outcome or "",
+                "price": round(price_val, 4),
+                "size": round(size, 2),
+                "timestamp": timestamp or "",
+                "market_slug": "unknown",
+                "market_title": "Unknown Market",
+                "is_large": size >= LARGE_TRADE_THRESHOLD
+            })
         
-    Returns:
-        交易列表
-    """
-    logger.info(f"查询市场交易: {slug}, limit={limit}, offset={cursor}")
-    
-    store = get_store()
-    market = store.fetch_market_by_slug(slug)
-    
-    if not market:
-        raise HTTPException(status_code=404, detail=f"市场未找到: {slug}")
-    
-    trades, total = store.fetch_trades_for_market(
-        market_id=market['id'],
-        limit=limit,
-        offset=cursor,
-        from_block=from_block,
-        to_block=to_block
-    )
-    
-    # 转换为响应模型
-    trade_responses = []
-    for t in trades:
-        trade_responses.append(TradeResponse(
-            id=t.get('id', 0),
-            market_id=t.get('market_id'),
-            tx_hash=t.get('tx_hash', ''),
-            log_index=t.get('log_index', 0),
-            block_number=t.get('block_number'),
-            maker=t.get('maker'),
-            taker=t.get('taker'),
-            side=t.get('side'),
-            outcome=t.get('outcome'),
-            price=float(t.get('price', 0)) if t.get('price') else None,
-            size=float(t.get('size', 0)) if t.get('size') else None,
-            token_id=t.get('token_id'),
-            exchange=t.get('exchange'),
-            timestamp=t.get('timestamp')
-        ))
-    
-    return TradeListResponse(
-        total=total,
-        limit=limit,
-        offset=cursor,
-        trades=trade_responses
-    )
+        return jsonify({"trades": trades, "count": len(trades)})
+    except Exception as e:
+        logger.error(f"获取最近交易失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({"trades": [], "error": str(e), "count": 0})
 
 
-# ========== Token 端点 ==========
-
-@app.get("/tokens/{token_id}/trades", response_model=TradeListResponse, tags=["Token"])
-async def get_token_trades(
-    token_id: str = Path(..., description="ERC-1155 Token ID"),
-    limit: int = Query(100, ge=1, le=1000, description="返回数量"),
-    cursor: int = Query(0, ge=0, alias="offset", description="偏移量")
-) -> TradeListResponse:
-    """
-    通过 TokenId 获取交易记录
+@app.route('/trades/large', methods=['GET'])
+def get_large_trades():
+    """获取大单交易"""
+    limit = request.args.get('limit', 50, type=int)
+    min_size = request.args.get('min_size', LARGE_TRADE_THRESHOLD, type=float)
     
-    Args:
-        token_id: ERC-1155 Token ID (十六进制或十进制)
-        limit: 返回数量 (1-1000)
-        cursor: 分页偏移量
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
         
-    Returns:
-        交易列表
-    """
-    logger.info(f"查询 TokenId 交易: {token_id[:20]}..., limit={limit}, offset={cursor}")
-    
-    store = get_store()
-    trades, total = store.fetch_trades_by_token(
-        token_id=token_id,
-        limit=limit,
-        offset=cursor
-    )
-    
-    if total == 0:
-        raise HTTPException(status_code=404, detail=f"TokenId 未找到交易: {token_id}")
-    
-    # 转换为响应模型
-    trade_responses = []
-    for t in trades:
-        trade_responses.append(TradeResponse(
-            id=t.get('id', 0),
-            market_id=t.get('market_id'),
-            tx_hash=t.get('tx_hash', ''),
-            log_index=t.get('log_index', 0),
-            block_number=t.get('block_number'),
-            maker=t.get('maker'),
-            taker=t.get('taker'),
-            side=t.get('side'),
-            outcome=t.get('outcome'),
-            price=float(t.get('price', 0)) if t.get('price') else None,
-            size=float(t.get('size', 0)) if t.get('size') else None,
-            token_id=t.get('token_id'),
-            exchange=t.get('exchange'),
-            timestamp=t.get('timestamp')
-        ))
-    
-    return TradeListResponse(
-        total=total,
-        limit=limit,
-        offset=cursor,
-        trades=trade_responses
-    )
-
-
-# ========== 交易者端点 ==========
-
-@app.get("/traders/{address}/trades", response_model=TradeListResponse, tags=["交易者"])
-async def get_trader_trades(
-    address: str = Path(..., description="交易者地址"),
-    limit: int = Query(100, ge=1, le=1000, description="返回数量"),
-    cursor: int = Query(0, ge=0, alias="offset", description="偏移量")
-) -> TradeListResponse:
-    """
-    获取交易者的交易记录
-    
-    Args:
-        address: 交易者钱包地址
-        limit: 返回数量 (1-1000)
-        cursor: 分页偏移量
+        cursor.execute("""
+            SELECT 
+                t.tx_hash, t.maker, t.taker, t.side, t.outcome,
+                t.price, t.maker_amount, t.taker_amount, t.timestamp
+            FROM trades t
+            ORDER BY 
+                CASE 
+                    WHEN CAST(t.maker_amount AS REAL) < CAST(t.taker_amount AS REAL) 
+                    THEN CAST(t.maker_amount AS REAL)
+                    ELSE CAST(t.taker_amount AS REAL)
+                END DESC
+            LIMIT 500
+        """)
         
-    Returns:
-        交易列表
-    """
-    logger.info(f"查询交易者: {address[:10]}..., limit={limit}, offset={cursor}")
-    
-    store = get_store()
-    trades, total = store.fetch_trades_by_address(
-        address=address,
-        limit=limit,
-        offset=cursor
-    )
-    
-    if total == 0:
-        raise HTTPException(status_code=404, detail=f"未找到该地址的交易: {address}")
-    
-    # 转换为响应模型
-    trade_responses = []
-    for t in trades:
-        trade_responses.append(TradeResponse(
-            id=t.get('id', 0),
-            market_id=t.get('market_id'),
-            tx_hash=t.get('tx_hash', ''),
-            log_index=t.get('log_index', 0),
-            block_number=t.get('block_number'),
-            maker=t.get('maker'),
-            taker=t.get('taker'),
-            side=t.get('side'),
-            outcome=t.get('outcome'),
-            price=float(t.get('price', 0)) if t.get('price') else None,
-            size=float(t.get('size', 0)) if t.get('size') else None,
-            token_id=t.get('token_id'),
-            exchange=t.get('exchange'),
-            timestamp=t.get('timestamp')
-        ))
-    
-    return TradeListResponse(
-        total=total,
-        limit=limit,
-        offset=cursor,
-        trades=trade_responses
-    )
+        rows = cursor.fetchall()
+        conn.close()
+        
+        trades = []
+        total_volume = buy_volume = sell_volume = 0
+        
+        for row in rows:
+            maker_amt = safe_float(row[6])
+            taker_amt = safe_float(row[7])
+            size = parse_trade_amount(maker_amt, taker_amt)
+            
+            if size < min_size:
+                continue
+            
+            price = calculate_price(maker_amt, taker_amt, row[5])
+            side = row[3] or "BUY"
+            
+            total_volume += size
+            if side == 'BUY':
+                buy_volume += size
+            else:
+                sell_volume += size
+            
+            trades.append({
+                "tx_hash": row[0],
+                "maker": row[1],
+                "taker": row[2],
+                "side": side,
+                "outcome": row[4],
+                "price": round(price, 4),
+                "size": round(size, 2),
+                "timestamp": row[8],
+                "market_slug": "unknown",
+                "market_title": "Unknown Market"
+            })
+            
+            if len(trades) >= limit:
+                break
+        
+        return jsonify({
+            "trades": trades,
+            "count": len(trades),
+            "min_size": min_size,
+            "summary": {
+                "total_volume": round(total_volume, 2),
+                "buy_volume": round(buy_volume, 2),
+                "sell_volume": round(sell_volume, 2),
+                "buy_ratio": round(buy_volume / total_volume * 100, 1) if total_volume > 0 else 50
+            },
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        logger.error(f"获取大单交易失败: {e}")
+        return jsonify({"trades": [], "error": str(e)}), 500
 
 
-# ========== 启动函数 ==========
+@app.route('/sentiment', methods=['GET'])
+def get_market_sentiment():
+    """获取市场情绪指数"""
+    market_slug = request.args.get('market', None)
+    
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute("SELECT side, maker_amount, taker_amount FROM trades")
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        buy_count = sell_count = 0
+        buy_volume = sell_volume = 0.0
+        
+        for row in rows:
+            side = row[0] or "BUY"
+            amount = parse_trade_amount(row[1], row[2])
+            
+            if side == 'BUY':
+                buy_count += 1
+                buy_volume += amount
+            else:
+                sell_count += 1
+                sell_volume += amount
+        
+        total_count = buy_count + sell_count
+        total_volume = buy_volume + sell_volume
+        
+        sentiment_by_count = buy_count / total_count * 100 if total_count > 0 else 50
+        sentiment_by_volume = buy_volume / total_volume * 100 if total_volume > 0 else 50
+        overall_sentiment = sentiment_by_count * 0.3 + sentiment_by_volume * 0.7
+        
+        if overall_sentiment >= 70:
+            sentiment_label = "极度乐观"
+        elif overall_sentiment >= 60:
+            sentiment_label = "乐观"
+        elif overall_sentiment >= 40:
+            sentiment_label = "中性"
+        elif overall_sentiment >= 30:
+            sentiment_label = "悲观"
+        else:
+            sentiment_label = "极度悲观"
+        
+        return jsonify({
+            "market": market_slug or "全市场",
+            "sentiment_index": round(overall_sentiment, 1),
+            "sentiment_label": sentiment_label,
+            "buy_count": buy_count,
+            "sell_count": sell_count,
+            "buy_volume": round(buy_volume, 2),
+            "sell_volume": round(sell_volume, 2),
+            "buy_ratio_count": round(sentiment_by_count, 1),
+            "buy_ratio_volume": round(sentiment_by_volume, 1),
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        logger.error(f"获取市场情绪失败: {e}")
+        return jsonify({"error": str(e)}), 500
 
-def main():
-    """启动 API 服务器"""
-    import argparse
+
+@app.route('/market/<slug>/price-history', methods=['GET'])
+def get_price_history(slug: str):
+    limit = request.args.get('limit', 100, type=int)
     
-    parser = argparse.ArgumentParser(description="PolyMind REST API 服务器")
-    parser.add_argument("--port", type=int, default=8000, help="服务端口")
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="绑定地址")
-    parser.add_argument("--db", type=str, default=None, help="数据库路径")
-    args = parser.parse_args()
-    
-    global DB_PATH
-    if args.db:
-        DB_PATH = args.db
-    
-    logger.info(f"启动 API 服务器: {args.host}:{args.port}")
-    logger.info(f"数据库路径: {DB_PATH}")
-    logger.info(f"API 文档: http://localhost:{args.port}/docs")
-    
-    uvicorn.run(
-        app,
-        host=args.host,
-        port=args.port,
-        log_level="info"
-    )
+    try:
+        conn = get_db()
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT t.price, t.timestamp, t.side, t.outcome, t.maker_amount, t.taker_amount
+            FROM trades t
+            LEFT JOIN markets m1 ON t.token_id = m1.yes_token_id
+            LEFT JOIN markets m2 ON t.token_id = m2.no_token_id
+            WHERE m1.slug = ? OR m2.slug = ?
+            ORDER BY t.id DESC
+            LIMIT ?
+        """, (slug, slug, limit))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        
+        rows = list(reversed(rows))
+        
+        history = []
+        for row in rows:
+            price = calculate_price(row[4], row[5], row[0])
+            size = parse_trade_amount(row[4], row[5])
+            history.append({
+                "price": round(price, 4),
+                "timestamp": row[1],
+                "side": row[2] or "BUY",
+                "outcome": row[3],
+                "size": round(size, 2)
+            })
+        
+        return jsonify({
+            "market_slug": slug,
+            "history": history,
+            "count": len(history),
+            "timestamp": datetime.now().isoformat()
+        })
+    except Exception as e:
+        logger.error(f"获取价格历史失败: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
-if __name__ == "__main__":
-    main()
+@app.route('/ws/stats', methods=['GET'])
+def get_ws_stats():
+    return jsonify(ws_manager.get_stats())
+
+
+@app.route('/ws/subscribe', methods=['POST'])
+def ws_subscribe():
+    data = request.get_json() or {}
+    client_id = data.get('client_id', 'test-client')
+    channel = data.get('channel', 'trades')
+    target = data.get('target')
+    
+    if client_id not in ws_manager.clients:
+        ws_manager.register_client(client_id)
+    
+    success = ws_manager.subscribe(client_id, channel, target)
+    return jsonify({"success": success, "client_id": client_id, "channel": channel, "target": target})
+
+
+@app.route('/hot', methods=['GET'])
+def get_hot_markets():
+    limit = request.args.get('limit', 10, type=int)
+    sort_by = request.args.get('sort', 'volume')
+    try:
+        result = tools.execute_tool("get_hot_markets", {"limit": limit, "sort_by": sort_by})
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"markets": [], "error": str(e)}), 500
+
+
+@app.route('/smart-money', methods=['GET'])
+def get_smart_money():
+    min_win_rate = request.args.get('min_win_rate', 50, type=float)
+    market_slug = request.args.get('market', None)
+    try:
+        result = tools.execute_tool("get_smart_money_activity", {"market_slug": market_slug, "min_win_rate": min_win_rate})
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"smart_money_addresses": [], "error": str(e)}), 500
+
+
+@app.route('/trader/<address>', methods=['GET'])
+def get_trader_detail(address: str):
+    try:
+        result = tools.execute_tool("analyze_trader", {"address": address})
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/arbitrage', methods=['GET'])
+def get_arbitrage():
+    limit = request.args.get('limit', 20, type=int)
+    try:
+        result = tools.execute_tool("find_arbitrage", {"limit": limit})
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"opportunities": [], "error": str(e)}), 500
+
+
+@app.route('/markets/search', methods=['GET'])
+def search_markets():
+    query = request.args.get('q', '')
+    limit = request.args.get('limit', 10, type=int)
+    if not query:
+        return jsonify({"results": [], "error": "缺少搜索关键词"}), 400
+    try:
+        result = tools.execute_tool("search_markets", {"query": query, "limit": limit})
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"results": [], "error": str(e)}), 500
+
+
+@app.route('/market/<slug>', methods=['GET'])
+def get_market_info(slug: str):
+    try:
+        result = tools.execute_tool("get_market_info", {"market_slug": slug})
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/nl-query', methods=['POST'])
+def natural_language_query():
+    try:
+        data = request.get_json() or {}
+        query = data.get('query', '')
+        if not query:
+            return jsonify({"error": "缺少查询内容"}), 400
+        
+        query_lower = query.lower()
+        
+        if '大单' in query or 'large' in query_lower:
+            result = get_large_trades().get_json()
+            result['type'] = 'large_trades'
+        elif '情绪' in query or 'sentiment' in query_lower:
+            result = get_market_sentiment().get_json()
+            result['type'] = 'sentiment'
+        elif '搜索' in query or 'search' in query_lower:
+            keywords = query.replace('搜索', '').replace('关于', '').replace('的市场', '').strip()
+            result = tools.execute_tool("search_markets", {"query": keywords, "limit": 10})
+            result['type'] = 'search'
+        elif '套利' in query or 'arbitrage' in query_lower:
+            result = tools.execute_tool("find_arbitrage", {"limit": 20})
+            result['type'] = 'arbitrage'
+        elif '热门' in query or 'hot' in query_lower:
+            result = tools.execute_tool("get_hot_markets", {"limit": 10, "sort_by": "volume"})
+            result['type'] = 'hot_markets'
+        elif '聪明钱' in query or 'smart money' in query_lower:
+            result = tools.execute_tool("get_smart_money_activity", {"min_win_rate": 50})
+            result['type'] = 'smart_money'
+        else:
+            result = tools.execute_tool("search_markets", {"query": query, "limit": 5})
+            result['type'] = 'search_fallback'
+        
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/advice/<slug>', methods=['GET'])
+def get_trading_advice(slug: str):
+    intent = request.args.get('intent', None)
+    try:
+        result = tools.execute_tool("get_trading_advice", {"market_slug": slug, "user_intent": intent})
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/alerts/<slug>', methods=['GET'])
+def get_smart_alerts(slug: str):
+    try:
+        result = tools.execute_tool("get_smart_alerts", {"watched_market": slug})
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/relationship', methods=['GET'])
+def analyze_relationship():
+    market_a = request.args.get('a', '')
+    market_b = request.args.get('b', '')
+    if not market_a or not market_b:
+        return jsonify({"error": "需要两个市场参数 a 和 b"}), 400
+    try:
+        result = tools.execute_tool("analyze_market_relationship", {"market_a": market_a, "market_b": market_b})
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route('/api-docs', methods=['GET'])
+def api_docs():
+    return jsonify({
+        "openapi": "3.0.0",
+        "info": {"title": "PolyMind MCP API", "version": "2.0.0"},
+        "paths": {
+            "/health": {"get": {"summary": "健康检查"}},
+            "/stats": {"get": {"summary": "统计数据"}},
+            "/trades/recent": {"get": {"summary": "最近交易"}},
+            "/trades/large": {"get": {"summary": "大单交易"}},
+            "/sentiment": {"get": {"summary": "市场情绪"}},
+            "/hot": {"get": {"summary": "热门市场"}},
+            "/smart-money": {"get": {"summary": "聪明钱"}},
+            "/arbitrage": {"get": {"summary": "套利机会"}},
+            "/markets/search": {"get": {"summary": "搜索市场"}},
+        }
+    })
+
+
+def run_server(host: str = '0.0.0.0', port: int = 8888, debug: bool = False):
+    logger.info(f"启动 API 服务器: http://{host}:{port}")
+    app.run(host=host, port=port, debug=debug, threaded=True)
+
+
+if __name__ == '__main__':
+    run_server(debug=True)

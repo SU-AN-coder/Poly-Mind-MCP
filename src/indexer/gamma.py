@@ -1,152 +1,151 @@
 """
-Gamma API集成
-
-Gamma API 是 Polymarket 官方提供的 REST API，用于获取市场、事件等数据。
+Gamma API 客户端
+用于获取 Polymarket 市场元数据
 """
-import requests
-from typing import Optional, Dict, List, Any
+import os
 import logging
+import requests
+from typing import Dict, List, Optional
+from datetime import datetime
 
+from src.db.schema import get_connection
+
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+GAMMA_BASE_URL = os.getenv("GAMMA_BASE_URL", "https://gamma-api.polymarket.com")
 
-class GammaAPIClient:
-    """Gamma API客户端"""
+
+class GammaClient:
+    """Gamma API 客户端"""
     
-    def __init__(self, base_url: str = "https://gamma-api.polymarket.com"):
+    def __init__(self, base_url: str = GAMMA_BASE_URL):
         self.base_url = base_url
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'PolyMind-MCP/1.0',
-            'Accept': 'application/json'
+            "Accept": "application/json",
+            "User-Agent": "PolyMind-MCP/1.0"
         })
     
-    def fetch_event(self, slug: str) -> Optional[Dict]:
-        """获取事件信息"""
+    def get_markets(self, limit: int = 100, offset: int = 0, active: bool = True) -> List[Dict]:
+        """获取市场列表"""
         try:
-            url = f"{self.base_url}/events/{slug}"
-            response = self.session.get(url, timeout=10)
+            params = {"_limit": limit, "_offset": offset}
+            if active:
+                params["active"] = "true"
+            
+            response = self.session.get(f"{self.base_url}/markets", params=params, timeout=30)
             response.raise_for_status()
             return response.json()
         except Exception as e:
-            logger.error(f"获取事件失败: {e}")
-            return None
-    
-    def fetch_market(self, slug: str) -> Optional[Dict]:
-        """获取市场信息"""
-        try:
-            url = f"{self.base_url}/markets/{slug}"
-            response = self.session.get(url, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.error(f"获取市场失败: {e}")
-            return None
-    
-    def fetch_event_markets(self, event_slug: str) -> List[Dict]:
-        """获取事件下的所有市场"""
-        try:
-            url = f"{self.base_url}/events/{event_slug}/markets"
-            response = self.session.get(url, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.error(f"获取事件市场列表失败: {e}")
+            logger.error(f"获取市场列表失败: {e}")
             return []
     
-    def fetch_active_markets(self, limit: int = 100, offset: int = 0) -> List[Dict]:
-        """
-        获取活跃市场列表
-        
-        Args:
-            limit: 返回数量限制
-            offset: 偏移量
-            
-        Returns:
-            市场列表
-        """
+    def get_market_by_slug(self, slug: str) -> Optional[Dict]:
+        """通过 slug 获取市场"""
         try:
-            url = f"{self.base_url}/markets"
-            params = {
-                'limit': limit,
-                'offset': offset,
-                'active': 'true',
-                'closed': 'false'
-            }
-            response = self.session.get(url, params=params, timeout=15)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.error(f"获取活跃市场失败: {e}")
-            return []
-    
-    def search_markets(self, query: str, limit: int = 10) -> List[Dict]:
-        """
-        搜索市场
-        
-        Args:
-            query: 搜索关键词
-            limit: 返回数量限制
-            
-        Returns:
-            匹配的市场列表
-        """
-        try:
-            url = f"{self.base_url}/markets"
-            params = {
-                'limit': limit,
-                '_q': query
-            }
-            response = self.session.get(url, params=params, timeout=10)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            logger.error(f"搜索市场失败: {e}")
-            return []
-    
-    def fetch_market_by_condition_id(self, condition_id: str) -> Optional[Dict]:
-        """
-        通过 condition_id 获取市场
-        
-        Args:
-            condition_id: 条件ID
-            
-        Returns:
-            市场信息或 None
-        """
-        try:
-            url = f"{self.base_url}/markets"
-            params = {
-                'conditionId': condition_id
-            }
-            response = self.session.get(url, params=params, timeout=10)
+            response = self.session.get(
+                f"{self.base_url}/markets",
+                params={"slug": slug},
+                timeout=15
+            )
             response.raise_for_status()
             markets = response.json()
             return markets[0] if markets else None
         except Exception as e:
-            logger.error(f"通过 condition_id 获取市场失败: {e}")
+            logger.error(f"获取市场 {slug} 失败: {e}")
             return None
     
-    def fetch_events(self, limit: int = 50, active: bool = True) -> List[Dict]:
-        """
-        获取事件列表
-        
-        Args:
-            limit: 返回数量限制
-            active: 是否只返回活跃事件
-            
-        Returns:
-            事件列表
-        """
+    def get_market_by_condition_id(self, condition_id: str) -> Optional[Dict]:
+        """通过 condition_id 获取市场"""
         try:
-            url = f"{self.base_url}/events"
-            params = {
-                'limit': limit,
-                'active': 'true' if active else 'false'
-            }
-            response = self.session.get(url, params=params, timeout=15)
+            response = self.session.get(
+                f"{self.base_url}/markets",
+                params={"conditionId": condition_id},
+                timeout=15
+            )
             response.raise_for_status()
-            return response.json()
+            markets = response.json()
+            return markets[0] if markets else None
         except Exception as e:
-            logger.error(f"获取事件列表失败: {e}")
-            return []
+            logger.error(f"获取市场 (condition_id={condition_id}) 失败: {e}")
+            return None
+    
+    def sync_markets_to_db(self, db_path: Optional[str] = None, limit: int = 500) -> int:
+        """同步市场数据到数据库"""
+        conn = get_connection(db_path)
+        cursor = conn.cursor()
+        
+        synced = 0
+        offset = 0
+        batch_size = 100
+        
+        while synced < limit:
+            markets = self.get_markets(limit=batch_size, offset=offset, active=True)
+            if not markets:
+                break
+            
+            for market in markets:
+                try:
+                    # 提取 token 信息
+                    tokens = market.get("tokens", [])
+                    yes_token_id = no_token_id = None
+                    yes_price = no_price = 0.5
+                    
+                    for token in tokens:
+                        outcome = token.get("outcome", "").lower()
+                        if outcome == "yes":
+                            yes_token_id = token.get("token_id")
+                            yes_price = float(token.get("price", 0.5))
+                        elif outcome == "no":
+                            no_token_id = token.get("token_id")
+                            no_price = float(token.get("price", 0.5))
+                    
+                    cursor.execute("""
+                        INSERT OR REPLACE INTO markets 
+                        (condition_id, slug, question, description, end_date, 
+                         yes_token_id, no_token_id, volume, liquidity, 
+                         yes_price, no_price, active, updated_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (
+                        market.get("conditionId"),
+                        market.get("slug"),
+                        market.get("question"),
+                        market.get("description", ""),
+                        market.get("endDate"),
+                        yes_token_id,
+                        no_token_id,
+                        float(market.get("volume", 0)),
+                        float(market.get("liquidity", 0)),
+                        yes_price,
+                        no_price,
+                        1 if market.get("active") else 0,
+                        datetime.now().isoformat()
+                    ))
+                    synced += 1
+                except Exception as e:
+                    logger.error(f"保存市场失败: {e}")
+                    continue
+            
+            offset += batch_size
+            if len(markets) < batch_size:
+                break
+        
+        conn.commit()
+        conn.close()
+        logger.info(f"同步完成，共 {synced} 个市场")
+        return synced
+
+
+# 便捷函数
+def sync_markets(db_path: Optional[str] = None, limit: int = 500) -> int:
+    """同步市场数据"""
+    client = GammaClient()
+    return client.sync_markets_to_db(db_path, limit)
+
+
+if __name__ == "__main__":
+    from src.db.schema import init_db
+    init_db()
+    count = sync_markets()
+    print(f"同步了 {count} 个市场")

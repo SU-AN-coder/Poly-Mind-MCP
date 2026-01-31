@@ -1,10 +1,47 @@
 # PolyMind MCP
 
-> 🧠 基于 MCP 协议的 AI 预测市场分析平台
+> AI 驱动的 Polymarket 预测市场分析平台，基于 MCP (Model Context Protocol) 构建
 
-![Python](https://img.shields.io/badge/Python-3.12+-blue)
-![MCP](https://img.shields.io/badge/MCP-2024--11--05-purple)
-![License](https://img.shields.io/badge/License-MIT-green)
+[![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://python.org)
+[![MCP](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io)
+[![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
+## 🌟 亮点功能
+
+- 🔍 **市场搜索**: 自然语言搜索 Polymarket 预测市场
+- 👤 **交易者画像**: 分析地址行为，生成智能标签（聪明钱、巨鲸、套利者）
+- 💡 **交易建议**: 基于多因素分析生成买卖建议
+- 🔄 **套利扫描**: 实时发现 YES+NO 定价偏差套利机会
+- 📊 **聪明钱追踪**: 识别高胜率地址并追踪其动态
+- 📈 **链上索引**: 实时索引 Polygon 链上交易数据
+
+---
+
+## 🚀 快速开始（30秒体验）
+
+### 方式一：一键演示模式（推荐）
+
+```bash
+# 1. 克隆项目
+git clone https://github.com/yourusername/polymind-mcp.git
+cd polymind-mcp
+
+# 2. 安装依赖
+pip install -r requirements.txt
+
+# 3. 一键启动（自动导入演示数据 + 启动服务）
+python start.py demo
+```
+
+### 方式二：本地环境搭建
+
+```bash
+# 1. 安装 Python 3.9+
+# 2. 克隆项目
+# 3. 安装依赖
+# 4. 配置环境变量
+# 5. 启动服务
+```
 
 ## 功能特性
 
@@ -60,18 +97,44 @@ python start.py all
 访问:
 - 前端看板: http://localhost:3000
 - MCP HTTP API: http://localhost:8888
+- WebSocket Demo: http://localhost:3000/websocket_demo.html
 
 ## HTTP API 端点
 
 | 端点 | 说明 |
 |------|------|
-| `GET /api/tools` | MCP 工具列表 |
-| `GET /api/markets/search?q=` | 搜索市场 |
-| `GET /api/smart-money` | 聪明钱活动 |
-| `GET /api/hot` | 热门市场 |
-| `GET /api/arbitrage` | 套利机会 |
-| `GET /api/trader/<address>` | 交易者分析 |
-| `POST /api/nl-query` | 自然语言查询 |
+| `GET /tools` | MCP 工具列表 |
+| `GET /markets/search?q=` | 搜索市场 |
+| `GET /smart-money` | 聪明钱活动 |
+| `GET /hot` | 热门市场 |
+| `GET /arbitrage` | 套利机会 |
+| `GET /trader/<address>` | 交易者分析 |
+| `GET /trader/<address>/pnl` | 🆕 交易者持仓盈亏 |
+| `GET /trader/<address>/positions` | 🆕 交易者持仓列表 |
+| `GET /leaderboard/pnl` | 🆕 盈亏排行榜 |
+| `GET /stats` | 仪表盘统计（真实数据）|
+| `GET /trades/recent` | 最近交易（真实数据）|
+| `GET /cache/stats` | 🆕 缓存统计 |
+| `POST /cache/flush` | 🆕 清空缓存 |
+| `GET /ws/stats` | 🆕 WebSocket 连接统计 |
+| `POST /nl-query` | 自然语言查询 |
+
+## WebSocket 实时推送
+
+支持频道订阅：
+- `trades` - 所有交易实时流
+- `markets` - 市场更新
+- `smart_money` - 聪明钱动态
+- `market` + target - 特定市场交易
+- `trader` + target - 特定交易者活动
+
+```javascript
+// 客户端示例
+const socket = io('http://localhost:8888');
+socket.on('connect', () => console.log('Connected'));
+socket.emit('subscribe', { channel: 'trades' });
+socket.on('new_trade', (data) => console.log('New trade:', data));
+```
 
 ## MCP 工具
 
