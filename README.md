@@ -343,7 +343,7 @@ mypy src/
 
 ## 团队成员
 
-- **开发者**: PolyMind Team
+- **开发者**: AN_SU,Ethan,Rustc.rs,bluerabbit2026
 
 ---
 
