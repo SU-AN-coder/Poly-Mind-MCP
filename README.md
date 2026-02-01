@@ -1,248 +1,151 @@
 # PolyMind MCP
 
-> AI 驱动的 Polymarket 预测市场分析平台，基于 MCP (Model Context Protocol) 构建
+> 🧠 AI 驱动的 Polymarket 预测市场分析平台
 
 [![Python](https://img.shields.io/badge/Python-3.9+-blue.svg)](https://python.org)
 [![MCP](https://img.shields.io/badge/MCP-Compatible-green.svg)](https://modelcontextprotocol.io)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
-## 🌟 亮点功能
+---
 
-- 🔍 **市场搜索**: 自然语言搜索 Polymarket 预测市场
-- 👤 **交易者画像**: 分析地址行为，生成智能标签（聪明钱、巨鲸、套利者）
-- 💡 **交易建议**: 基于多因素分析生成买卖建议
-- 🔄 **套利扫描**: 实时发现 YES+NO 定价偏差套利机会
-- 📊 **聪明钱追踪**: 识别高胜率地址并追踪其动态
-- 📈 **链上索引**: 实时索引 Polygon 链上交易数据
+## 项目简介
+
+**PolyMind MCP** 是一个基于 Polygon 链上真实数据构建的 Polymarket 生态数据分析平台。通过解码链上 `OrderFilled` 事件，提供聪明钱追踪、市场情绪分析、套利机会检测等功能，帮助交易者做出更明智的决策。
+
+**核心价值**：
+- 🔗 **链上数据驱动** - 直接从 Polygon 链获取并解码真实交易数据
+- 🧠 **聪明钱分析** - 识别高胜率交易者，追踪其持仓变化
+- 📊 **可视化看板** - 实时展示市场情绪、大单监控、热门市场
+- 🤖 **MCP 协议** - 支持 Claude Desktop 集成，自然语言查询
 
 ---
 
-## 🚀 快速开始（30秒体验）
+## 技术架构
 
-### 方式一：一键演示模式（推荐）
-
-```bash
-# 1. 克隆项目
-git clone https://github.com/yourusername/polymind-mcp.git
-cd polymind-mcp
-
-# 2. 安装依赖
-pip install -r requirements.txt
-
-# 3. 一键启动（自动导入演示数据 + 启动服务）
-python start.py demo
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Frontend (React)                        │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌──────────┐        │
+│  │ 情绪仪表 │ │ 大单监控 │ │ 热门市场 │ │ 聪明钱   │        │
+│  └──────────┘ └──────────┘ └──────────┘ └──────────┘        │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    HTTP API (Flask)                          │
+│  /stats  /hot  /smart-money  /trades  /sentiment  /arbitrage│
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    MCP Tools Layer                           │
+│  ┌────────────┐ ┌────────────┐ ┌────────────┐               │
+│  │ Profiler   │ │ Advisor    │ │ Analyzer   │               │
+│  │ 交易者画像 │ │ 交易建议   │ │ 套利检测   │               │
+│  └────────────┘ └────────────┘ └────────────┘               │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│                    Data Layer                                │
+│  ┌────────────┐ ┌────────────┐ ┌────────────┐               │
+│  │ Indexer    │ │ Decoder    │ │ SQLite DB  │               │
+│  │ 区块链索引 │ │ 交易解码   │ │ 数据存储   │               │
+│  └────────────┘ └────────────┘ └────────────┘               │
+└─────────────────────────────────────────────────────────────┘
+                              │
+                              ▼
+┌─────────────────────────────────────────────────────────────┐
+│              External Data Sources                           │
+│  ┌────────────────────┐  ┌────────────────────┐             │
+│  │ Polygon RPC        │  │ Gamma API          │             │
+│  │ CTF Exchange Events│  │ Market Metadata    │             │
+│  └────────────────────┘  └────────────────────┘             │
+└─────────────────────────────────────────────────────────────┘
 ```
 
-### 方式二：本地环境搭建
+**技术栈**：
+- **后端**: Python 3.9+, Flask, SQLite
+- **前端**: React (CDN), Tailwind CSS
+- **链上交互**: Web3.py, Polygon RPC
+- **协议**: MCP (Model Context Protocol)
 
-```bash
-# 1. 安装 Python 3.9+
-# 2. 克隆项目
-# 3. 安装依赖
-# 4. 配置环境变量
-# 5. 启动服务
-```
-
-## 功能特性
-
-- 🔗 **链上数据解码** - 解析 Polymarket CTF Exchange OrderFilled 事件
-- 🧠 **聪明钱分析** - 追踪高胜率交易者动向
-- 💡 **AI 交易建议** - 基于 LLM 的智能分析
-- 📊 **实时看板** - 可视化监控面板
-- 🤖 **MCP 协议** - 支持 Claude Desktop / Cursor 集成
+---
 
 ## 快速开始
 
-### 1. 安装依赖
+### 环境要求
+
+- Python 3.9+
+- 有效的 Polygon RPC URL（推荐 Alchemy/Infura）
+
+### 安装步骤
 
 ```bash
+# 1. 克隆项目
+git clone https://github.com/your-repo/polymind-mcp.git
+cd polymind-mcp
+
+# 2. 创建虚拟环境
 python -m venv venv
 .\venv\Scripts\activate  # Windows
 # source venv/bin/activate  # macOS/Linux
 
+# 3. 安装依赖
 pip install -r requirements.txt
-```
 
-### 2. 配置环境变量
-
-```bash
+# 4. 配置环境变量
 cp .env.example .env
-# 编辑 .env，填入配置
+# 编辑 .env，填入 RPC_URL
 ```
 
-需要的环境变量：
-- `POLYGON_RPC_URL` - Polygon 主网 RPC URL（必需）
-- `OPENAI_API_KEY` - OpenAI API Key（可选，用于高级分析）
-- `DB_PATH` - 数据库路径（默认 `data/polymarket.db`）
-
-### 3. 启动服务
+### 运行命令
 
 ```bash
-# 模式一：索引链上交易数据
-python start.py index --from-block 50000000
+# 🚀 一键演示模式（推荐评审使用）
+python start.py demo
 
-# 模式二：同步 Gamma API 市场数据
-python start.py sync-markets
+# 📊 验证数据
+python verify_data.py
 
-# 模式三：启动 HTTP API 服务
+# 🌐 只启动 API 服务
 python start.py api
 
-# 模式四：MCP stdio 服务（用于 Claude Desktop）
-python -m src.mcp.mcp_server
+# 🔗 索引链上数据（需要 RPC_URL）
+python start.py index --from-block 66000000 --to-block 66001000
 
-# 一键启动所有服务（索引 + 同步 + API）
-python start.py all
+# 📦 同步市场元数据
+python start.py sync-markets
 ```
 
-访问:
-- 前端看板: http://localhost:3000
-- MCP HTTP API: http://localhost:8888
-- WebSocket Demo: http://localhost:3000/websocket_demo.html
+### 访问地址
 
-## HTTP API 端点
-
-| 端点 | 说明 |
+| 服务 | 地址 |
 |------|------|
-| `GET /tools` | MCP 工具列表 |
-| `GET /markets/search?q=` | 搜索市场 |
-| `GET /smart-money` | 聪明钱活动 |
-| `GET /hot` | 热门市场 |
-| `GET /arbitrage` | 套利机会 |
-| `GET /trader/<address>` | 交易者分析 |
-| `GET /trader/<address>/pnl` | 🆕 交易者持仓盈亏 |
-| `GET /trader/<address>/positions` | 🆕 交易者持仓列表 |
-| `GET /leaderboard/pnl` | 🆕 盈亏排行榜 |
-| `GET /stats` | 仪表盘统计（真实数据）|
-| `GET /trades/recent` | 最近交易（真实数据）|
-| `GET /cache/stats` | 🆕 缓存统计 |
-| `POST /cache/flush` | 🆕 清空缓存 |
-| `GET /ws/stats` | 🆕 WebSocket 连接统计 |
-| `POST /nl-query` | 自然语言查询 |
+| API 服务 | http://localhost:8888 |
+| 前端看板 | http://localhost:3000（需另启动前端服务） |
+| 健康检查 | http://localhost:8888/health |
 
-## WebSocket 实时推送
-
-支持频道订阅：
-- `trades` - 所有交易实时流
-- `markets` - 市场更新
-- `smart_money` - 聪明钱动态
-- `market` + target - 特定市场交易
-- `trader` + target - 特定交易者活动
-
-```javascript
-// 客户端示例
-const socket = io('http://localhost:8888');
-socket.on('connect', () => console.log('Connected'));
-socket.emit('subscribe', { channel: 'trades' });
-socket.on('new_trade', (data) => console.log('New trade:', data));
+启动前端看板：
+```bash
+cd frontend
+python -m http.server 3000
 ```
 
-## MCP 工具
-
-```python
-tools = [
-    "get_market_info",          # 市场详情
-    "search_markets",           # 搜索市场
-    "analyze_trader",           # 交易者画像
-    "get_trading_advice",       # 交易建议
-    "find_arbitrage",           # 套利扫描
-    "get_smart_money_activity", # 聪明钱
-    "get_hot_markets",          # 热门市场
-    "analyze_market_relationship", # 市场关系分析
-    "natural_language_query",   # 自然语言查询
-]
-```
-
-## Claude Desktop 配置
-
-添加到 `%APPDATA%\Claude\claude_desktop_config.json` (Windows) 或 `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS):
-
-```json
-{
-  "mcpServers": {
-    "polymind": {
-      "command": "python",
-      "args": ["-m", "src.mcp.mcp_server"],
-      "cwd": "C:\\Users\\你的用户名\\Desktop\\Poly Mind MCP",
-      "env": {
-        "PYTHONPATH": "C:\\Users\\你的用户名\\Desktop\\Poly Mind MCP"
-      }
-    }
-  }
-}
-```
-
-## 项目结构
-
-```
-PolyMind-MCP/
-├── src/
-│   ├── mcp/               # MCP 服务
-│   │   ├── mcp_server.py  # stdio JSON-RPC 服务
-│   │   ├── server.py      # HTTP API 服务
-│   │   ├── tools.py       # MCP 工具实现
-│   │   ├── profiler.py    # 交易者画像分析
-│   │   └── advisor.py     # 交易建议引擎
-│   ├── api/               # REST API
-│   ├── ctf/               # Token ID 计算
-│   ├── db/                # 数据库 schema
-│   ├── indexer/           # 区块链索引器
-│   │   ├── run.py         # 索引器主逻辑
-│   │   ├── store.py       # 数据存储
-│   │   └── gamma.py       # Gamma API 客户端
-│   ├── trade_decoder.py   # 交易解码器
-│   └── market_decoder.py  # 市场解码器
-├── data/                  # 数据目录
-│   └── polymarket.db      # SQLite 数据库
-├── frontend/              # Web 看板
-├── tests/                 # 测试
-├── start.py               # 统一启动脚本
-├── run_mcp_server.py      # HTTP API 启动脚本
-├── test_mcp.py            # MCP 工具测试
-├── test_mcp_stdio.py      # MCP stdio 服务器测试
-├── mcp_config.json        # Claude Desktop 配置示例
-├── requirements.txt
-└── .env.example
-```
-
-## 环境变量
-
-| 变量 | 必需 | 说明 |
-|------|------|------|
-| `RPC_URL` | ✅ | Polygon RPC 地址 |
-| `OPENAI_API_KEY` | ❌ | OpenAI API（启用 AI 分析）|
-| `DB_PATH` | ❌ | 数据库路径 |
-
-## 数据来源
-
-本项目使用以下数据源：
-
-| 数据类型 | 来源 | 说明 |
-|---------|------|------|
-| **交易数据** | Polygon 链上 | 通过 RPC 获取 CTF Exchange 的 OrderFilled 事件 |
-| **市场元数据** | Gamma API | 获取市场 slug、描述、Token ID 映射 |
-| **价格数据** | 链上计算 | 基于交易事件计算 YES/NO 价格 |
-
-### 合约地址
-
-- **CTF Exchange**: `0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E`
-- **Neg Risk CTF Exchange**: `0xC5d563A36AE78145C45a50134d48A1215220f80a`
-- **OrderFilled Event**: `0xd0a08e8c493f9c94f29311604c9de1b4e8c8d4c06bd0c789af57f2d65bfec0f6`
-
-### 示例数据
-
-- 示例交易哈希: `0x916cad96dd5c219997638133512fd17fe7c1ce72b830157e4fd5323cf4f19946`
-- 示例市场: `will-there-be-another-us-government-shutdown-by-january-31`
+---
 
 ## 功能说明
 
 ### 核心功能
 
-1. **链上数据索引** - 解析 Polymarket CTF Exchange 交易事件
-2. **市场数据同步** - 从 Gamma API 获取市场元数据
-3. **交易者画像** - 基于 LLM 的语义化标签生成
-4. **聪明钱分析** - 追踪高胜率交易者动向
-5. **套利检测** - YES+NO 套利和跨市场价差分析
-6. **MCP 协议支持** - Claude Desktop / Cursor 集成
+| 功能 | 说明 | API 端点 |
+|------|------|----------|
+| **市场情绪分析** | 基于买卖比例计算市场情绪指数 | `GET /sentiment` |
+| **大单监控** | 追踪 >$1000 的大额交易 | `GET /trades/large` |
+| **聪明钱追踪** | 识别高胜率交易者 | `GET /smart-money` |
+| **热门市场** | 按交易量排序的活跃市场 | `GET /hot` |
+| **套利机会** | 检测 YES+NO 价差套利 | `GET /arbitrage` |
+| **交易者画像** | 分析地址交易行为 | `GET /trader/{address}` |
 
 ### MCP 工具列表
 
@@ -258,26 +161,192 @@ PolyMind-MCP/
 | `analyze_market_relationship` | 分析市场关系 |
 | `natural_language_query` | 自然语言查询 |
 
+---
+
+## HTTP API 端点
+
+### 数据查询
+
+| 方法 | 端点 | 说明 |
+|------|------|------|
+| GET | `/health` | 健康检查 + 数据状态 |
+| GET | `/stats` | 仪表盘统计（真实数据） |
+| GET | `/trades/recent` | 最近交易列表 |
+| GET | `/trades/large` | 大单交易监控 |
+| GET | `/hot` | 热门市场排行 |
+| GET | `/markets/search?q=` | 搜索市场 |
+
+### 分析功能
+
+| 方法 | 端点 | 说明 |
+|------|------|------|
+| GET | `/sentiment` | 市场情绪指数 |
+| GET | `/smart-money` | 聪明钱活动 |
+| GET | `/trader/{address}` | 交易者分析 |
+| GET | `/arbitrage` | 套利机会 |
+
+### AI 功能
+
+| 方法 | 端点 | 说明 |
+|------|------|------|
+| POST | `/nl-query` | 自然语言查询 |
+| GET | `/markets/{slug}/advice` | 交易建议 |
+
+---
+
+## 数据来源
+
+本项目使用以下数据源：
+
+| 数据类型 | 来源 | 说明 |
+|---------|------|------|
+| **交易数据** | Polygon 链上 | 通过 RPC 获取 CTF Exchange 的 `OrderFilled` 事件 |
+| **市场元数据** | Gamma API | 获取市场 slug、描述、Token ID 映射 |
+| **价格数据** | 链上计算 | 基于交易事件计算 YES/NO 价格 |
+
+### 合约地址
+
+| 合约 | 地址 |
+|------|------|
+| CTF Exchange | `0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E` |
+| Neg Risk Exchange | `0xC5d563A36AE78145C45a50134d48A1215220f80a` |
+| USDC (Collateral) | `0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174` |
+
+### 示例数据
+
+- **交易哈希**: `0x916cad96dd5c219997638133512fd17fe7c1ce72b830157e4fd5323cf4f19946`
+- **市场 Slug**: `will-there-be-another-us-government-shutdown-by-january-31`
+
+可在 Polygonscan 验证: https://polygonscan.com/tx/0x916cad96dd5c219997638133512fd17fe7c1ce72b830157e4fd5323cf4f19946
+
+---
+
+## 项目结构
+
+```
+PolyMind-MCP/
+├── src/
+│   ├── mcp/                   # MCP 服务模块
+│   │   ├── server.py          # HTTP API 服务
+│   │   ├── mcp_server.py      # MCP stdio 服务
+│   │   ├── tools.py           # MCP 工具实现
+│   │   ├── profiler.py        # 交易者画像
+│   │   └── advisor.py         # 交易建议引擎
+│   ├── indexer/               # 区块链索引器
+│   │   ├── run.py             # 索引器主逻辑
+│   │   ├── store.py           # 数据存储
+│   │   └── gamma.py           # Gamma API 客户端
+│   ├── db/                    # 数据库模块
+│   │   └── schema.py          # 表结构定义
+│   ├── trade_decoder.py       # 交易解码器
+│   └── market_decoder.py      # 市场参数解码器
+├── frontend/                  # Web 前端
+│   ├── index.html             # 主页面
+│   ├── script.js              # React 组件
+│   └── styles.css             # 样式
+├── data/                      # 数据目录
+│   └── polymarket.db          # SQLite 数据库
+├── tests/                     # 测试
+├── docs/                      # 文档
+├── start.py                   # 统一启动脚本
+├── verify_data.py             # 数据验证脚本
+├── requirements.txt           # Python 依赖
+├── .env.example               # 环境变量示例
+├── README.md                  # 项目说明
+└── DEMO.md                    # 演示说明
+```
+
+---
+
+## 环境变量
+
+| 变量 | 必需 | 说明 |
+|------|------|------|
+| `RPC_URL` | ✅ | Polygon RPC 地址 |
+| `OPENAI_API_KEY` | ❌ | OpenAI API（启用 AI 分析）|
+| `DB_PATH` | ❌ | 数据库路径（默认 `data/polymarket.db`） |
+| `GAMMA_BASE_URL` | ❌ | Gamma API 地址 |
+
+---
+
+## Claude Desktop 配置
+
+将以下内容添加到 Claude Desktop 配置文件：
+
+**macOS**: `~/Library/Application Support/Claude/claude_desktop_config.json`
+**Windows**: `%APPDATA%\Claude\claude_desktop_config.json`
+
+```json
+{
+  "mcpServers": {
+    "polymind": {
+      "command": "python",
+      "args": ["-m", "src.mcp.mcp_server"],
+      "cwd": "/path/to/polymind-mcp",
+      "env": {
+        "RPC_URL": "your-polygon-rpc-url"
+      }
+    }
+  }
+}
+```
+
+配置完成后，可在 Claude Desktop 中直接查询：
+- "显示最热门的 10 个预测市场"
+- "分析地址 0x1234... 的交易行为"
+- "查找当前的套利机会"
+
+---
+
 ## 开发
 
+### 运行测试
+
 ```bash
-# 运行测试
+# 运行所有测试
 pytest tests/
 
-# 验证数据
-python verify_data.py
+# 运行特定测试
+pytest tests/test_market_decoder.py -v
 
-# 运行 MCP stdio 测试
-python test_mcp_stdio.py
-
-# 运行 MCP 工具测试
-python test_mcp.py
+# 验证系统
+python verify_system.py
 ```
+
+### 代码风格
+
+```bash
+# 格式化代码
+black src/
+
+# 类型检查
+mypy src/
+```
+
+---
+
+## 激励机制设计
+
+### 防止作恶
+
+1. **链上数据不可篡改** - 所有交易数据直接从 Polygon 链获取并验证
+2. **透明的聪明钱算法** - 胜率计算基于链上可验证的交易历史
+3. **开源可审计** - 所有代码开源，任何人可以验证数据处理逻辑
+
+### 激励正确预测
+
+1. **聪明钱排行榜** - 高胜率交易者获得曝光，建立链上信誉
+2. **跟单信号** - 用户可追踪表现优秀的交易者
+3. **套利提醒** - 及时发现市场定价偏差，奖励信息发现者
+
+---
 
 ## 团队成员
 
-（请在此处填写团队成员信息）
+- **开发者**: PolyMind Team
+
+---
 
 ## License
 
-MIT
+MIT License - 详见 [LICENSE](LICENSE) 文件
