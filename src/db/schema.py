@@ -13,7 +13,9 @@ def get_connection(db_path: Optional[str] = None) -> sqlite3.Connection:
     """获取数据库连接"""
     path = db_path or DB_PATH
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    return sqlite3.connect(path)
+    conn = sqlite3.connect(path)
+    conn.row_factory = sqlite3.Row
+    return conn
 
 
 def get_table_columns(cursor, table_name: str) -> set:
@@ -31,38 +33,83 @@ def table_exists(cursor, table_name: str) -> bool:
     return cursor.fetchone() is not None
 
 
+def add_column_if_not_exists(cursor, table_name: str, column_name: str, column_type: str):
+    """安全地添加列（如果不存在）"""
+    columns = get_table_columns(cursor, table_name)
+    if column_name not in columns:
+        try:
+            cursor.execute(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+            print(f"   ✅ 添加列: {table_name}.{column_name}")
+            return True
+        except sqlite3.OperationalError as e:
+            if "duplicate column" not in str(e).lower():
+                print(f"   ⚠️ 添加列失败: {table_name}.{column_name} - {e}")
+    return False
+
+
 def init_db(db_path: Optional[str] = None):
     """
     初始化数据库
     - 创建不存在的表
     - 安全地添加缺失的列
-    - 创建索引（仅当列存在时）
+    - 创建索引
     """
     conn = get_connection(db_path)
     cursor = conn.cursor()
     
+    print("   初始化数据库...")
+    
     # =========================================================================
-    # 创建 markets 表
+    # 创建 markets 表（完整结构）
     # =========================================================================
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS markets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            event_id TEXT,
             condition_id TEXT UNIQUE,
-            slug TEXT UNIQUE,
+            slug TEXT,
+            question_id TEXT,
+            oracle TEXT,
+            collateral_token TEXT,
+            yes_token_id TEXT,
+            no_token_id TEXT,
+            enable_neg_risk INTEGER DEFAULT 0,
+            outcome_slot_count INTEGER DEFAULT 2,
+            status TEXT DEFAULT 'active',
+            title TEXT,
             question TEXT,
             description TEXT,
             category TEXT,
-            yes_token_id TEXT,
-            no_token_id TEXT,
             volume REAL DEFAULT 0,
             liquidity REAL DEFAULT 0,
             yes_price REAL DEFAULT 0.5,
             no_price REAL DEFAULT 0.5,
+            end_date TEXT,
             active INTEGER DEFAULT 1,
+            closed INTEGER DEFAULT 0,
+            resolved INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+    
+    # 添加 markets 表缺失的列
+    if table_exists(cursor, 'markets'):
+        markets_columns = {
+            'volume': 'REAL DEFAULT 0',
+            'liquidity': 'REAL DEFAULT 0',
+            'yes_price': 'REAL DEFAULT 0.5',
+            'no_price': 'REAL DEFAULT 0.5',
+            'question': 'TEXT',
+            'description': 'TEXT',
+            'category': 'TEXT',
+            'end_date': 'TEXT',
+            'active': 'INTEGER DEFAULT 1',
+            'closed': 'INTEGER DEFAULT 0',
+            'resolved': 'INTEGER DEFAULT 0',
+        }
+        for col_name, col_type in markets_columns.items():
+            add_column_if_not_exists(cursor, 'markets', col_name, col_type)
     
     # =========================================================================
     # 创建 trades 表
@@ -72,46 +119,51 @@ def init_db(db_path: Optional[str] = None):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             tx_hash TEXT,
             log_index INTEGER DEFAULT 0,
+            exchange TEXT,
+            order_hash TEXT,
             block_number INTEGER,
             timestamp TEXT,
             maker TEXT,
             taker TEXT,
+            maker_asset_id TEXT,
+            taker_asset_id TEXT,
+            maker_amount TEXT,
+            taker_amount TEXT,
+            fee TEXT,
+            fee_amount TEXT,
             side TEXT,
             outcome TEXT,
             price REAL,
             size REAL,
-            maker_amount TEXT,
-            taker_amount TEXT,
-            fee_amount TEXT,
             token_id TEXT,
             condition_id TEXT,
             market_slug TEXT,
-            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            market_id INTEGER,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            UNIQUE(tx_hash, log_index)
         )
     """)
     
-    # 检查并添加 trades 表缺失的列
+    # 添加 trades 表缺失的列
     if table_exists(cursor, 'trades'):
-        existing_columns = get_table_columns(cursor, 'trades')
-        
-        # 需要添加的列及其定义
-        columns_to_add = {
+        trades_columns = {
+            'exchange': 'TEXT',
+            'order_hash': 'TEXT',
+            'maker_asset_id': 'TEXT',
+            'taker_asset_id': 'TEXT',
+            'fee': 'TEXT',
+            'fee_amount': 'TEXT',
             'market_slug': 'TEXT',
+            'market_id': 'INTEGER',
             'outcome': 'TEXT',
             'price': 'REAL',
             'size': 'REAL',
             'log_index': 'INTEGER DEFAULT 0',
-            'fee_amount': 'TEXT',
             'condition_id': 'TEXT',
+            'token_id': 'TEXT',
         }
-        
-        for col_name, col_type in columns_to_add.items():
-            if col_name not in existing_columns:
-                try:
-                    cursor.execute(f"ALTER TABLE trades ADD COLUMN {col_name} {col_type}")
-                    print(f"   ✅ 添加列: trades.{col_name}")
-                except sqlite3.OperationalError:
-                    pass  # 列已存在
+        for col_name, col_type in trades_columns.items():
+            add_column_if_not_exists(cursor, 'trades', col_name, col_type)
     
     # =========================================================================
     # 创建 events 表
@@ -178,34 +230,32 @@ def init_db(db_path: Optional[str] = None):
         CREATE TABLE IF NOT EXISTS indexer_state (
             id INTEGER PRIMARY KEY,
             last_block INTEGER DEFAULT 0,
+            total_trades INTEGER DEFAULT 0,
             last_update TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     
     # =========================================================================
-    # 安全创建索引（仅当列存在时）
+    # 创建索引
     # =========================================================================
-    if table_exists(cursor, 'trades'):
-        columns = get_table_columns(cursor, 'trades')
-        
-        if 'maker' in columns:
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_maker ON trades(maker)")
-        if 'taker' in columns:
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_taker ON trades(taker)")
-        if 'block_number' in columns:
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_block ON trades(block_number)")
-        if 'market_slug' in columns:
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_market_slug ON trades(market_slug)")
-        if 'timestamp' in columns:
-            cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp)")
+    # trades 索引
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_tx_hash ON trades(tx_hash)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_maker ON trades(maker)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_taker ON trades(taker)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_block ON trades(block_number)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_market_slug ON trades(market_slug)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_timestamp ON trades(timestamp)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_trades_token_id ON trades(token_id)")
     
-    if table_exists(cursor, 'markets'):
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_markets_slug ON markets(slug)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_markets_condition ON markets(condition_id)")
+    # markets 索引
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_markets_slug ON markets(slug)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_markets_condition ON markets(condition_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_markets_yes_token ON markets(yes_token_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_markets_no_token ON markets(no_token_id)")
     
-    if table_exists(cursor, 'trader_profiles'):
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_profiles_address ON trader_profiles(address)")
-        cursor.execute("CREATE INDEX IF NOT EXISTS idx_profiles_win_rate ON trader_profiles(win_rate)")
+    # trader_profiles 索引
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_profiles_address ON trader_profiles(address)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_profiles_win_rate ON trader_profiles(win_rate)")
     
     conn.commit()
     conn.close()
@@ -218,66 +268,44 @@ def reset_db(db_path: Optional[str] = None):
     path = db_path or DB_PATH
     if os.path.exists(path):
         os.remove(path)
-        print(f"   ⚠️ 已删除旧数据库: {path}")
-    init_db(db_path)
+        print(f"   ⚠️ 已删除数据库: {path}")
+    init_db(path)
+
+
+def migrate_db(db_path: Optional[str] = None):
+    """迁移数据库 - 添加缺失的列"""
+    print("   开始数据库迁移...")
+    init_db(db_path)  # init_db 会安全地添加缺失的列
+    print("   ✅ 数据库迁移完成")
 
 
 def get_last_indexed_block(db_path: Optional[str] = None) -> int:
     """获取最后索引的区块号"""
     conn = get_connection(db_path)
     cursor = conn.cursor()
-    
-    # 尝试从 indexer_state 表获取
     try:
         cursor.execute("SELECT last_block FROM indexer_state WHERE id = 1")
         row = cursor.fetchone()
-        if row:
-            conn.close()
-            return row[0]
-    except sqlite3.OperationalError:
-        pass
-    
-    # 尝试从 sync_state 表获取
-    try:
-        cursor.execute("SELECT last_block FROM sync_state WHERE id = 1")
-        row = cursor.fetchone()
-        if row:
-            conn.close()
-            return row[0]
-    except sqlite3.OperationalError:
-        pass
-    
-    conn.close()
-    return 0
+        return row[0] if row else 0
+    except:
+        return 0
+    finally:
+        conn.close()
 
 
 def set_last_indexed_block(block_number: int, db_path: Optional[str] = None):
     """设置最后索引的区块号"""
     conn = get_connection(db_path)
     cursor = conn.cursor()
-    
-    # 更新 indexer_state 表
     cursor.execute("""
-        INSERT INTO indexer_state (id, last_block, last_update) 
+        INSERT OR REPLACE INTO indexer_state (id, last_block, last_update)
         VALUES (1, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(id) DO UPDATE SET 
-            last_block = excluded.last_block,
-            last_update = CURRENT_TIMESTAMP
     """, (block_number,))
-    
-    # 同时更新 sync_state 表（兼容性）
-    cursor.execute("""
-        INSERT INTO sync_state (id, last_block, last_update) 
-        VALUES (1, ?, CURRENT_TIMESTAMP)
-        ON CONFLICT(id) DO UPDATE SET 
-            last_block = excluded.last_block,
-            last_update = CURRENT_TIMESTAMP
-    """, (block_number,))
-    
     conn.commit()
     conn.close()
 
 
 if __name__ == "__main__":
+    print("初始化/迁移数据库...")
     init_db()
-    print("Database initialized successfully!")
+    print("完成！")

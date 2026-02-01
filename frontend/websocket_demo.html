@@ -4,7 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>PolyMind WebSocket Demo</title>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.6.0/socket.io.min.js"></script>
+    <!-- 使用与后端兼容的 Socket.IO 版本 -->
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
@@ -20,8 +21,18 @@
             background: linear-gradient(90deg, #00d4ff, #7c3aed);
             -webkit-background-clip: text;
             -webkit-text-fill-color: transparent;
+            background-clip: text;
             margin-bottom: 20px;
+            font-size: 2rem;
         }
+        .back-link {
+            display: inline-block;
+            margin-bottom: 15px;
+            color: #00d4ff;
+            text-decoration: none;
+            font-size: 14px;
+        }
+        .back-link:hover { text-decoration: underline; }
         .status-bar {
             display: flex;
             gap: 20px;
@@ -29,6 +40,7 @@
             padding: 15px;
             background: rgba(255,255,255,0.05);
             border-radius: 10px;
+            flex-wrap: wrap;
         }
         .status-item {
             display: flex;
@@ -36,12 +48,21 @@
             gap: 8px;
         }
         .status-dot {
-            width: 10px;
-            height: 10px;
+            width: 12px;
+            height: 12px;
             border-radius: 50%;
             background: #ef4444;
+            transition: background 0.3s;
         }
         .status-dot.connected { background: #22c55e; }
+        .status-dot.connecting { 
+            background: #f59e0b; 
+            animation: pulse 1s infinite;
+        }
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
         .controls {
             display: flex;
             gap: 10px;
@@ -55,9 +76,19 @@
             cursor: pointer;
             font-size: 14px;
             transition: all 0.3s;
+            font-weight: 500;
+        }
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+            transform: none !important;
         }
         .btn-primary {
             background: linear-gradient(90deg, #00d4ff, #0099cc);
+            color: white;
+        }
+        .btn-success {
+            background: linear-gradient(90deg, #22c55e, #16a34a);
             color: white;
         }
         .btn-danger {
@@ -69,7 +100,7 @@
             color: #e0e0e0;
             border: 1px solid rgba(255,255,255,0.2);
         }
-        button:hover { transform: translateY(-2px); opacity: 0.9; }
+        button:hover:not(:disabled) { transform: translateY(-2px); opacity: 0.9; }
         .panels {
             display: grid;
             grid-template-columns: 1fr 1fr;
@@ -77,6 +108,7 @@
         }
         @media (max-width: 768px) {
             .panels { grid-template-columns: 1fr; }
+            .subscription-form { flex-direction: column; }
         }
         .panel {
             background: rgba(255,255,255,0.05);
@@ -84,65 +116,121 @@
             padding: 20px;
             max-height: 500px;
             overflow: hidden;
+            border: 1px solid rgba(255,255,255,0.1);
         }
         .panel h3 {
             color: #00d4ff;
             margin-bottom: 15px;
             display: flex;
             justify-content: space-between;
+            align-items: center;
         }
         .panel h3 span {
             font-size: 12px;
             color: #888;
+            background: rgba(0,0,0,0.3);
+            padding: 4px 8px;
+            border-radius: 4px;
         }
         .log-container {
             height: 400px;
             overflow-y: auto;
-            font-family: monospace;
-            font-size: 13px;
+            font-family: 'Consolas', 'Monaco', monospace;
+            font-size: 12px;
         }
         .log-item {
-            padding: 8px 10px;
-            margin-bottom: 5px;
+            padding: 10px 12px;
+            margin-bottom: 6px;
             background: rgba(0,0,0,0.3);
             border-radius: 6px;
             border-left: 3px solid #00d4ff;
+            transition: background 0.2s;
+        }
+        .log-item:hover {
+            background: rgba(0,0,0,0.5);
         }
         .log-item.trade { border-left-color: #22c55e; }
-        .log-item.error { border-left-color: #ef4444; }
+        .log-item.error { border-left-color: #ef4444; background: rgba(239, 68, 68, 0.1); }
         .log-item.info { border-left-color: #f59e0b; }
+        .log-item.system { border-left-color: #8b5cf6; }
         .log-time {
-            color: #888;
-            font-size: 11px;
+            color: #666;
+            font-size: 10px;
+            margin-bottom: 2px;
         }
         .log-event {
             color: #00d4ff;
             font-weight: bold;
+            font-size: 13px;
         }
         .log-data {
-            color: #e0e0e0;
-            margin-top: 5px;
+            color: #a0a0a0;
+            margin-top: 6px;
             word-break: break-all;
+            white-space: pre-wrap;
+            font-size: 11px;
+            max-height: 150px;
+            overflow-y: auto;
         }
         .subscription-form {
             display: flex;
             gap: 10px;
             margin-top: 15px;
+            flex-wrap: wrap;
+        }
+        .input-group {
+            display: flex;
+            gap: 8px;
+            flex: 1;
+            min-width: 250px;
         }
         input {
             flex: 1;
-            padding: 10px;
+            padding: 10px 12px;
             border: 1px solid rgba(255,255,255,0.2);
             border-radius: 8px;
             background: rgba(0,0,0,0.3);
             color: white;
+            font-size: 14px;
+            transition: border-color 0.3s;
         }
-        input::placeholder { color: #888; }
+        input:focus {
+            outline: none;
+            border-color: #00d4ff;
+        }
+        input::placeholder { color: #666; }
+        .error-banner {
+            background: rgba(239, 68, 68, 0.2);
+            border: 1px solid rgba(239, 68, 68, 0.5);
+            border-radius: 8px;
+            padding: 12px 16px;
+            margin-bottom: 15px;
+            display: none;
+            color: #fca5a5;
+        }
+        .error-banner.show { display: block; }
+        .help-text {
+            font-size: 12px;
+            color: #666;
+            margin-top: 10px;
+            padding: 10px;
+            background: rgba(0,0,0,0.2);
+            border-radius: 6px;
+        }
+        .help-text code {
+            background: rgba(0,212,255,0.2);
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: #00d4ff;
+        }
     </style>
 </head>
 <body>
     <div class="container">
+        <a href="index.html" class="back-link">← 返回主仪表盘</a>
         <h1>🔌 PolyMind WebSocket Demo</h1>
+        
+        <div id="errorBanner" class="error-banner"></div>
         
         <div class="status-bar">
             <div class="status-item">
@@ -153,34 +241,58 @@
                 <span>消息数: <strong id="msgCount">0</strong></span>
             </div>
             <div class="status-item">
+                <span>延迟: <strong id="latency">-</strong></span>
+            </div>
+            <div class="status-item">
                 <span>客户端 ID: <strong id="clientId">-</strong></span>
             </div>
         </div>
         
         <div class="controls">
-            <button class="btn-primary" onclick="connect()">连接</button>
-            <button class="btn-danger" onclick="disconnect()">断开</button>
-            <button class="btn-secondary" onclick="subscribeTrades()">订阅交易流</button>
-            <button class="btn-secondary" onclick="subscribeSmartMoney()">订阅聪明钱</button>
-            <button class="btn-secondary" onclick="ping()">Ping</button>
-            <button class="btn-secondary" onclick="clearLogs()">清空日志</button>
+            <button id="btnConnect" class="btn-success" onclick="connect()">🔗 连接</button>
+            <button id="btnDisconnect" class="btn-danger" onclick="disconnect()" disabled>断开</button>
+            <button id="btnTrades" class="btn-secondary" onclick="subscribeTrades()" disabled>📊 订阅交易流</button>
+            <button id="btnSmartMoney" class="btn-secondary" onclick="subscribeSmartMoney()" disabled>💎 订阅聪明钱</button>
+            <button id="btnPing" class="btn-secondary" onclick="ping()" disabled>🏓 Ping</button>
+            <button class="btn-secondary" onclick="clearLogs()">🗑️ 清空日志</button>
         </div>
         
         <div class="subscription-form">
-            <input type="text" id="marketSlug" placeholder="输入市场 Slug 订阅特定市场...">
-            <button class="btn-primary" onclick="subscribeMarket()">订阅市场</button>
-            <input type="text" id="traderAddress" placeholder="输入交易者地址订阅...">
-            <button class="btn-primary" onclick="subscribeTrader()">订阅交易者</button>
+            <div class="input-group">
+                <input type="text" id="marketSlug" placeholder="输入市场 Slug (如: will-trump-win-2024)">
+                <button id="btnMarket" class="btn-primary" onclick="subscribeMarket()" disabled>订阅市场</button>
+            </div>
+            <div class="input-group">
+                <input type="text" id="traderAddress" placeholder="输入交易者地址 (0x...)">
+                <button id="btnTrader" class="btn-primary" onclick="subscribeTrader()" disabled>订阅交易者</button>
+            </div>
+        </div>
+        
+        <div class="help-text">
+            💡 <strong>使用说明:</strong> 
+            1. 确保 API 服务已启动 (<code>python start.py api</code>)
+            2. 点击"连接"按钮建立 WebSocket 连接
+            3. 订阅感兴趣的频道接收实时数据
         </div>
         
         <div class="panels" style="margin-top: 20px;">
             <div class="panel">
-                <h3>📨 接收的消息 <span id="logCount">0</span></h3>
-                <div class="log-container" id="messageLog"></div>
+                <h3>📨 接收的消息 <span id="logCount">0 条</span></h3>
+                <div class="log-container" id="messageLog">
+                    <div class="log-item system">
+                        <div class="log-event">等待连接...</div>
+                        <div class="log-data">点击"连接"按钮开始</div>
+                    </div>
+                </div>
             </div>
             <div class="panel">
-                <h3>📤 发送的消息 <span id="sentCount">0</span></h3>
-                <div class="log-container" id="sentLog"></div>
+                <h3>📤 发送的消息 <span id="sentCount">0 条</span></h3>
+                <div class="log-container" id="sentLog">
+                    <div class="log-item system">
+                        <div class="log-event">等待操作...</div>
+                        <div class="log-data">发送的消息将显示在这里</div>
+                    </div>
+                </div>
             </div>
         </div>
     </div>
@@ -189,8 +301,41 @@
         let socket = null;
         let msgCount = 0;
         let sentCount = 0;
+        let pingTime = 0;
         
-        const WS_URL = 'http://localhost:8888';
+        // 从当前页面 URL 推断 API 地址
+        const currentHost = window.location.hostname || 'localhost';
+        const WS_URL = `http://${currentHost}:8888`;
+        
+        // 按钮元素
+        const btnConnect = document.getElementById('btnConnect');
+        const btnDisconnect = document.getElementById('btnDisconnect');
+        const btnTrades = document.getElementById('btnTrades');
+        const btnSmartMoney = document.getElementById('btnSmartMoney');
+        const btnPing = document.getElementById('btnPing');
+        const btnMarket = document.getElementById('btnMarket');
+        const btnTrader = document.getElementById('btnTrader');
+        
+        function setButtonsState(connected) {
+            btnConnect.disabled = connected;
+            btnDisconnect.disabled = !connected;
+            btnTrades.disabled = !connected;
+            btnSmartMoney.disabled = !connected;
+            btnPing.disabled = !connected;
+            btnMarket.disabled = !connected;
+            btnTrader.disabled = !connected;
+        }
+        
+        function showError(message) {
+            const banner = document.getElementById('errorBanner');
+            banner.textContent = '❌ ' + message;
+            banner.classList.add('show');
+            setTimeout(() => banner.classList.remove('show'), 5000);
+        }
+        
+        function hideError() {
+            document.getElementById('errorBanner').classList.remove('show');
+        }
         
         function connect() {
             if (socket && socket.connected) {
@@ -198,131 +343,243 @@
                 return;
             }
             
+            // 清空初始提示
+            document.getElementById('messageLog').innerHTML = '';
+            document.getElementById('sentLog').innerHTML = '';
+            
+            updateStatus('connecting');
             addSentLog('connect', { url: WS_URL });
             
-            socket = io(WS_URL, {
-                transports: ['websocket', 'polling'],
-                reconnection: true,
-                reconnectionAttempts: 5
-            });
-            
-            socket.on('connect', () => {
-                updateStatus(true);
-                addLog('连接成功', 'info');
-            });
-            
-            socket.on('connected', (data) => {
-                document.getElementById('clientId').textContent = data.client_id.substring(0, 8) + '...';
-                addLog('connected', 'info', data);
-            });
-            
-            socket.on('disconnect', () => {
-                updateStatus(false);
-                addLog('连接断开', 'error');
-            });
-            
-            socket.on('new_trade', (data) => {
-                addLog('new_trade', 'trade', data);
-            });
-            
-            socket.on('market_trade', (data) => {
-                addLog('market_trade', 'trade', data);
-            });
-            
-            socket.on('market_update', (data) => {
-                addLog('market_update', 'info', data);
-            });
-            
-            socket.on('smart_money_activity', (data) => {
-                addLog('smart_money_activity', 'info', data);
-            });
-            
-            socket.on('trader_activity', (data) => {
-                addLog('trader_activity', 'trade', data);
-            });
-            
-            socket.on('subscribed', (data) => {
-                addLog('subscribed', 'info', data);
-            });
-            
-            socket.on('pong', (data) => {
-                addLog('pong', 'info', data);
-            });
-            
-            socket.on('error', (error) => {
-                addLog('error', 'error', { error: error.message || error });
-            });
+            try {
+                socket = io(WS_URL, {
+                    transports: ['websocket', 'polling'],
+                    reconnection: true,
+                    reconnectionAttempts: 5,
+                    reconnectionDelay: 1000,
+                    timeout: 10000,
+                    forceNew: true
+                });
+                
+                socket.on('connect', () => {
+                    hideError();
+                    updateStatus('connected');
+                    addLog('✅ 连接成功', 'info', { 
+                        transport: socket.io.engine.transport.name,
+                        url: WS_URL 
+                    });
+                    setButtonsState(true);
+                });
+                
+                socket.on('connected', (data) => {
+                    const clientId = data.client_id || data.sid || socket.id;
+                    document.getElementById('clientId').textContent = 
+                        clientId ? clientId.substring(0, 8) + '...' : socket.id.substring(0, 8) + '...';
+                    addLog('🎉 服务器确认连接', 'info', data);
+                });
+                
+                socket.on('connect_error', (error) => {
+                    console.error('Connection error:', error);
+                    updateStatus('disconnected');
+                    showError(`连接失败: ${error.message || '无法连接到服务器'}`);
+                    addLog('连接错误', 'error', { 
+                        message: error.message,
+                        description: error.description,
+                        type: error.type
+                    });
+                    setButtonsState(false);
+                });
+                
+                socket.on('disconnect', (reason) => {
+                    updateStatus('disconnected');
+                    addLog('🔌 连接断开', 'error', { reason });
+                    setButtonsState(false);
+                    
+                    if (reason === 'io server disconnect') {
+                        showError('服务器断开了连接');
+                    } else if (reason === 'transport close') {
+                        showError('网络连接中断');
+                    }
+                });
+                
+                socket.on('reconnecting', (attemptNumber) => {
+                    updateStatus('connecting');
+                    addLog('🔄 正在重连...', 'info', { attempt: attemptNumber });
+                });
+                
+                socket.on('reconnect', (attemptNumber) => {
+                    hideError();
+                    updateStatus('connected');
+                    addLog('✅ 重连成功', 'info', { attempts: attemptNumber });
+                    setButtonsState(true);
+                });
+                
+                socket.on('reconnect_failed', () => {
+                    updateStatus('disconnected');
+                    showError('重连失败，请手动重试');
+                    addLog('重连失败', 'error');
+                    setButtonsState(false);
+                });
+                
+                // 业务事件监听
+                socket.on('new_trade', (data) => {
+                    addLog('📈 new_trade', 'trade', data);
+                });
+                
+                socket.on('market_trade', (data) => {
+                    addLog('📊 market_trade', 'trade', data);
+                });
+                
+                socket.on('market_update', (data) => {
+                    addLog('🔄 market_update', 'info', data);
+                });
+                
+                socket.on('smart_money_activity', (data) => {
+                    addLog('💎 smart_money_activity', 'info', data);
+                });
+                
+                socket.on('trader_activity', (data) => {
+                    addLog('👤 trader_activity', 'trade', data);
+                });
+                
+                socket.on('subscribed', (data) => {
+                    addLog('✅ 订阅成功', 'info', data);
+                });
+                
+                socket.on('unsubscribed', (data) => {
+                    addLog('📤 取消订阅', 'info', data);
+                });
+                
+                socket.on('pong', (data) => {
+                    const latency = Date.now() - pingTime;
+                    document.getElementById('latency').textContent = latency + 'ms';
+                    addLog('🏓 pong', 'info', { ...data, latency: latency + 'ms' });
+                });
+                
+                socket.on('error', (error) => {
+                    addLog('❌ 服务器错误', 'error', { 
+                        error: typeof error === 'object' ? error.message || JSON.stringify(error) : error 
+                    });
+                });
+                
+            } catch (e) {
+                console.error('Socket creation error:', e);
+                showError('创建连接失败: ' + e.message);
+                updateStatus('disconnected');
+            }
         }
         
         function disconnect() {
             if (socket) {
+                addSentLog('disconnect', {});
                 socket.disconnect();
                 socket = null;
-                updateStatus(false);
+                updateStatus('disconnected');
+                setButtonsState(false);
+                document.getElementById('clientId').textContent = '-';
+                document.getElementById('latency').textContent = '-';
             }
         }
         
         function subscribeTrades() {
-            if (!socket) return alert('请先连接');
+            if (!checkConnection()) return;
             socket.emit('subscribe', { channel: 'trades' });
             addSentLog('subscribe', { channel: 'trades' });
         }
         
         function subscribeSmartMoney() {
-            if (!socket) return alert('请先连接');
+            if (!checkConnection()) return;
             socket.emit('subscribe', { channel: 'smart_money' });
             addSentLog('subscribe', { channel: 'smart_money' });
         }
         
         function subscribeMarket() {
-            if (!socket) return alert('请先连接');
+            if (!checkConnection()) return;
             const slug = document.getElementById('marketSlug').value.trim();
-            if (!slug) return alert('请输入市场 Slug');
+            if (!slug) {
+                showError('请输入市场 Slug');
+                return;
+            }
             socket.emit('subscribe', { channel: 'market', target: slug });
             addSentLog('subscribe', { channel: 'market', target: slug });
         }
         
         function subscribeTrader() {
-            if (!socket) return alert('请先连接');
+            if (!checkConnection()) return;
             const address = document.getElementById('traderAddress').value.trim();
-            if (!address) return alert('请输入交易者地址');
-            socket.emit('subscribe', { channel: 'trader', target: address });
-            addSentLog('subscribe', { channel: 'trader', target: address });
+            if (!address) {
+                showError('请输入交易者地址');
+                return;
+            }
+            if (!address.startsWith('0x') || address.length !== 42) {
+                showError('请输入有效的以太坊地址 (0x...)');
+                return;
+            }
+            socket.emit('subscribe', { channel: 'trader', target: address.toLowerCase() });
+            addSentLog('subscribe', { channel: 'trader', target: address.toLowerCase() });
         }
         
         function ping() {
-            if (!socket) return alert('请先连接');
-            socket.emit('ping');
-            addSentLog('ping', {});
+            if (!checkConnection()) return;
+            pingTime = Date.now();
+            socket.emit('ping', { timestamp: pingTime });
+            addSentLog('ping', { timestamp: pingTime });
         }
         
-        function updateStatus(connected) {
+        function checkConnection() {
+            if (!socket || !socket.connected) {
+                showError('请先连接到服务器');
+                return false;
+            }
+            return true;
+        }
+        
+        function updateStatus(state) {
             const dot = document.getElementById('statusDot');
             const text = document.getElementById('statusText');
-            if (connected) {
-                dot.classList.add('connected');
-                text.textContent = '已连接';
-            } else {
-                dot.classList.remove('connected');
-                text.textContent = '未连接';
+            
+            dot.classList.remove('connected', 'connecting');
+            
+            switch(state) {
+                case 'connected':
+                    dot.classList.add('connected');
+                    text.textContent = '已连接';
+                    break;
+                case 'connecting':
+                    dot.classList.add('connecting');
+                    text.textContent = '连接中...';
+                    break;
+                default:
+                    text.textContent = '未连接';
             }
         }
         
         function addLog(event, type, data = null) {
             msgCount++;
             document.getElementById('msgCount').textContent = msgCount;
-            document.getElementById('logCount').textContent = msgCount;
+            document.getElementById('logCount').textContent = msgCount + ' 条';
             
             const container = document.getElementById('messageLog');
             const item = document.createElement('div');
             item.className = `log-item ${type}`;
             
-            const time = new Date().toLocaleTimeString();
+            const time = new Date().toLocaleTimeString('zh-CN', { 
+                hour12: false, 
+                hour: '2-digit', 
+                minute: '2-digit', 
+                second: '2-digit',
+                fractionalSecondDigits: 3
+            });
+            
             let html = `<div class="log-time">${time}</div>`;
             html += `<div class="log-event">${event}</div>`;
             if (data) {
-                const dataStr = JSON.stringify(data, null, 2);
-                html += `<div class="log-data">${dataStr.substring(0, 300)}${dataStr.length > 300 ? '...' : ''}</div>`;
+                try {
+                    const dataStr = JSON.stringify(data, null, 2);
+                    const displayStr = dataStr.length > 500 ? dataStr.substring(0, 500) + '\n... (truncated)' : dataStr;
+                    html += `<div class="log-data">${escapeHtml(displayStr)}</div>`;
+                } catch (e) {
+                    html += `<div class="log-data">[无法序列化的数据]</div>`;
+                }
             }
             item.innerHTML = html;
             
@@ -336,19 +593,35 @@
         
         function addSentLog(event, data) {
             sentCount++;
-            document.getElementById('sentCount').textContent = sentCount;
+            document.getElementById('sentCount').textContent = sentCount + ' 条';
             
             const container = document.getElementById('sentLog');
             const item = document.createElement('div');
             item.className = 'log-item info';
             
-            const time = new Date().toLocaleTimeString();
+            const time = new Date().toLocaleTimeString('zh-CN', { 
+                hour12: false, 
+                hour: '2-digit', 
+                minute: '2-digit', 
+                second: '2-digit'
+            });
+            
             let html = `<div class="log-time">${time}</div>`;
-            html += `<div class="log-event">${event}</div>`;
-            html += `<div class="log-data">${JSON.stringify(data)}</div>`;
+            html += `<div class="log-event">→ ${event}</div>`;
+            html += `<div class="log-data">${escapeHtml(JSON.stringify(data, null, 2))}</div>`;
             item.innerHTML = html;
             
             container.insertBefore(item, container.firstChild);
+            
+            while (container.children.length > 50) {
+                container.removeChild(container.lastChild);
+            }
+        }
+        
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
         }
         
         function clearLogs() {
@@ -357,9 +630,34 @@
             msgCount = 0;
             sentCount = 0;
             document.getElementById('msgCount').textContent = '0';
-            document.getElementById('logCount').textContent = '0';
-            document.getElementById('sentCount').textContent = '0';
+            document.getElementById('logCount').textContent = '0 条';
+            document.getElementById('sentCount').textContent = '0 条';
         }
+        
+        // 页面关闭时断开连接
+        window.addEventListener('beforeunload', () => {
+            if (socket) {
+                socket.disconnect();
+            }
+        });
+        
+        // 检查服务器是否可用
+        window.addEventListener('load', async () => {
+            try {
+                const response = await fetch(WS_URL + '/health', { 
+                    method: 'GET',
+                    timeout: 3000 
+                });
+                if (response.ok) {
+                    addLog('🟢 API 服务可用', 'info', { url: WS_URL });
+                }
+            } catch (e) {
+                addLog('🔴 API 服务不可用', 'error', { 
+                    url: WS_URL,
+                    tip: '请运行: python start.py api' 
+                });
+            }
+        });
     </script>
 </body>
 </html>
